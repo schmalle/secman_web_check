@@ -15,11 +15,48 @@ from .config import ScannerConfig
 
 _EXPLICIT_SCHEME = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*://")
 _RFC1918_NETWORKS = (
-    ipaddress.ip_network("10.0.0.0/8"),
-    ipaddress.ip_network("172.16.0.0/12"),
-    ipaddress.ip_network("192.168.0.0/16"),
+    ipaddress.IPv4Network("10.0.0.0/8"),
+    ipaddress.IPv4Network("172.16.0.0/12"),
+    ipaddress.IPv4Network("192.168.0.0/16"),
 )
-_ULA_NETWORK = ipaddress.ip_network("fc00::/7")
+_ULA_NETWORK = ipaddress.IPv6Network("fc00::/7")
+
+# IANA IPv4/IPv6 Special-Purpose Address Registries, snapshot 2026-09-10.
+# RFC1918 and ULA ranges are deliberately excluded: allow_private controls them below.
+_IANA_IPV4_SPECIAL_PURPOSE_DENY_NETWORKS = (
+    ipaddress.IPv4Network("0.0.0.0/8"),
+    ipaddress.IPv4Network("100.64.0.0/10"),
+    ipaddress.IPv4Network("127.0.0.0/8"),
+    ipaddress.IPv4Network("169.254.0.0/16"),
+    ipaddress.IPv4Network("192.0.0.0/24"),
+    ipaddress.IPv4Network("192.0.2.0/24"),
+    ipaddress.IPv4Network("192.31.196.0/24"),
+    ipaddress.IPv4Network("192.52.193.0/24"),
+    ipaddress.IPv4Network("192.88.99.0/24"),
+    ipaddress.IPv4Network("192.175.48.0/24"),
+    ipaddress.IPv4Network("198.18.0.0/15"),
+    ipaddress.IPv4Network("198.51.100.0/24"),
+    ipaddress.IPv4Network("203.0.113.0/24"),
+    ipaddress.IPv4Network("224.0.0.0/4"),
+    ipaddress.IPv4Network("240.0.0.0/4"),
+)
+_IANA_IPV6_SPECIAL_PURPOSE_DENY_NETWORKS = (
+    ipaddress.IPv6Network("::/128"),
+    ipaddress.IPv6Network("::1/128"),
+    ipaddress.IPv6Network("64:ff9b::/96"),
+    ipaddress.IPv6Network("64:ff9b:1::/48"),
+    ipaddress.IPv6Network("100::/64"),
+    ipaddress.IPv6Network("100:0:0:1::/64"),
+    ipaddress.IPv6Network("2001::/23"),
+    ipaddress.IPv6Network("2001:db8::/32"),
+    ipaddress.IPv6Network("2002::/16"),
+    ipaddress.IPv6Network("2620:4f:8000::/48"),
+    ipaddress.IPv6Network("3fff::/20"),
+    ipaddress.IPv6Network("5f00::/16"),
+    ipaddress.IPv6Network("fec0::/10"),
+    ipaddress.IPv6Network("fe80::/10"),
+    ipaddress.IPv6Network("ff00::/8"),
+)
 
 
 class TargetError(ValueError):
@@ -53,22 +90,22 @@ class AddressPolicy:
 
     def allows(self, address: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
         """Return whether an address is eligible for an outbound scanner connection."""
-        if (
-            address.is_loopback
-            or address.is_link_local
-            or address.is_multicast
-            or address.is_unspecified
-            or address.is_reserved
-        ):
-            return False
-        if isinstance(address, ipaddress.IPv6Address) and address.is_site_local:
-            return False
+        if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped is not None:
+            return self.allows(address.ipv4_mapped)
         if isinstance(address, ipaddress.IPv4Address) and any(
             address in network for network in _RFC1918_NETWORKS
         ):
             return self.allow_private
         if isinstance(address, ipaddress.IPv6Address) and address in _ULA_NETWORK:
             return self.allow_private
+        if isinstance(address, ipaddress.IPv4Address) and any(
+            address in network for network in _IANA_IPV4_SPECIAL_PURPOSE_DENY_NETWORKS
+        ):
+            return False
+        if isinstance(address, ipaddress.IPv6Address) and any(
+            address in network for network in _IANA_IPV6_SPECIAL_PURPOSE_DENY_NETWORKS
+        ):
+            return False
         return address.is_global
 
 

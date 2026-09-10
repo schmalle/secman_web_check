@@ -85,6 +85,22 @@ def test_private_opt_in_allows_only_rfc1918_and_ula_addresses() -> None:
     assert not policy.allows(ipaddress.ip_address("100.64.0.1"))
 
 
+@pytest.mark.parametrize(
+    "address",
+    ["192.0.0.9", "192.0.0.10", "192.31.196.1", "192.88.99.1", "2001:1::1"],
+)
+def test_private_opt_in_denies_iana_special_purpose_addresses(address: str) -> None:
+    assert not AddressPolicy(allow_private=True).allows(ipaddress.ip_address(address))
+
+
+@pytest.mark.parametrize(
+    ("address", "allowed"),
+    [("::ffff:10.1.2.3", True), ("::ffff:192.0.0.9", False)],
+)
+def test_ipv4_mapped_ipv6_uses_the_ipv4_policy(address: str, allowed: bool) -> None:
+    assert AddressPolicy(allow_private=True).allows(ipaddress.ip_address(address)) is allowed
+
+
 def test_resolution_rejects_a_mixed_safe_and_private_answer_set() -> None:
     target = normalize_target("https://mixed.example")
     resolver = lambda *_: [
@@ -94,6 +110,20 @@ def test_resolution_rejects_a_mixed_safe_and_private_answer_set() -> None:
 
     with pytest.raises(AddressDenied):
         resolve_allowed(target, AddressPolicy(), resolver)
+
+
+@pytest.mark.parametrize(
+    "address",
+    ["192.0.0.9", "192.0.0.10", "192.31.196.1", "192.88.99.1", "2001:1::1"],
+)
+def test_resolution_rejects_iana_special_purpose_answers(address: str) -> None:
+    target = normalize_target("https://special-purpose.example")
+    family = socket.AF_INET6 if ":" in address else socket.AF_INET
+    sockaddr = (address, 443, 0, 0) if family == socket.AF_INET6 else (address, 443)
+    resolver = lambda *_: [(family, socket.SOCK_STREAM, 6, "", sockaddr)]
+
+    with pytest.raises(AddressDenied):
+        resolve_allowed(target, AddressPolicy(allow_private=True), resolver)
 
 
 def test_resolution_deduplicates_allowed_answers_in_order() -> None:
