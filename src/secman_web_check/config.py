@@ -45,7 +45,7 @@ def _coerce(name: str, value: object) -> bool | int | float:
     if name in {"active", "allow_private_targets"}:
         return _parse_bool(value, name)
     if name in {"concurrency", "max_body_bytes", "max_redirects"}:
-        if isinstance(value, (str, int, float)) and not isinstance(value, bool):
+        if isinstance(value, (str, int)) and not isinstance(value, bool):
             return int(value)
         raise ValueError(f"{name} must be an integer")
     if name in {"connect_timeout_seconds", "read_timeout_seconds"}:
