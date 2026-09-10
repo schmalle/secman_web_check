@@ -6,7 +6,8 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
 from hashlib import sha256
-from typing import Any
+
+from .targets import NormalizedTarget
 
 
 class Severity(StrEnum):
@@ -81,7 +82,7 @@ class Finding:
 
 @dataclass(frozen=True, slots=True)
 class TargetResult:
-    target: Any
+    target: NormalizedTarget
     status: TargetStatus
     findings: tuple[Finding, ...] = ()
     errors: tuple[str, ...] = ()
