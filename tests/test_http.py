@@ -342,3 +342,44 @@ def test_unsafe_method_and_header_injection_fail_before_network():
     with pytest.raises(CollectionError):
         collector.collect(target, headers={"Origin": "https://scanner.invalid\r\nCookie: fake"})
     assert backend.dials == []
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "X-API-Key",
+        "api-key",
+        "X-Auth-Token",
+        "x-access-token",
+        "X-Amz-Security-Token",
+        "Authentication-Info",
+        "Proxy-Authentication-Info",
+        "Authorization",
+        "Proxy-Authorization",
+        "Cookie",
+        "X-Service-API-Key",
+        "X-Service-Auth-Token",
+        "X-Service-Access-Token",
+        "X-Service-Security-Token",
+        "X-Service-Refresh-Token",
+    ],
+)
+def test_credential_response_headers_are_redacted_in_evidence(name):
+    backend = FakeBackend(response(headers=[(name, "response-credential-sentinel")]))
+    collector, _ = make_collector(backend)
+    result = collector.collect(normalize_target("https://example.com"))[-1]
+    assert (name.lower(), "<redacted>") in result.headers
+    assert "response-credential-sentinel" not in repr(result)
+
+
+def test_credential_suffixes_preserve_noncredential_security_headers():
+    headers = [
+        ("X-Token-Policy", "strict"),
+        ("Public-Key-Pins-Report-Only", "max-age=60"),
+        ("X-Key-ID", "public-identifier"),
+        ("X-Auth-Token-Lifetime", "60"),
+    ]
+    backend = FakeBackend(response(headers=headers))
+    collector, _ = make_collector(backend)
+    result = collector.collect(normalize_target("https://example.com"))[-1]
+    assert all((name.lower(), value) in result.headers for name, value in headers)

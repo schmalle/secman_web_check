@@ -148,17 +148,36 @@ def _redirect_target(base_url: str, location: str) -> NormalizedTarget:
     return normalize_target(urljoin(base_url, location))
 
 
+def _is_credential_header(name: str) -> bool:
+    name = name.lower()
+    return name in {
+        "authorization",
+        "proxy-authorization",
+        "cookie",
+        "set-cookie",
+        "x-api-key",
+        "api-key",
+        "x-auth-token",
+        "x-access-token",
+        "x-amz-security-token",
+        "authentication-info",
+        "proxy-authentication-info",
+    } or name.endswith(
+        ("-api-key", "-auth-token", "-access-token", "-security-token", "-refresh-token")
+    )
+
+
 def _safe_headers(headers: httpx.Headers, base_url: str) -> tuple[tuple[str, str], ...]:
     result = []
     for name, value in headers.multi_items():
-        if name in {"authorization", "proxy-authorization", "cookie"}:
-            value = "<redacted>"
-        elif name == "set-cookie":
+        if name == "set-cookie":
             first, separator, attributes = value.partition(";")
             cookie_name, equals, _ = first.partition("=")
             value = f"{cookie_name}=<redacted>" if equals else "<redacted>"
             if separator:
                 value += separator + attributes
+        elif _is_credential_header(name):
+            value = "<redacted>"
         elif name == "location":
             try:
                 value = _safe_url(_redirect_target(base_url, value).url)
