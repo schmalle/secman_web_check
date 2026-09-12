@@ -1,0 +1,6 @@
+# Replace these reserved example names with systems you are authorized to scan.
+https://example.com/
+example.org
+
+# Paths are allowed and are scanned as explicit targets; the scanner does not crawl.
+https://example.net/application/health

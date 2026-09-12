@@ -21,6 +21,10 @@ class SecmanIntegrationError(RuntimeError):
     """Raised when the SecMan integration contract cannot be satisfied."""
 
 
+class AmbiguousSubject(SecmanIntegrationError):
+    """Raised when a target does not map to exactly one authorized subject."""
+
+
 @dataclass(frozen=True, slots=True)
 class IntegrationSubject:
     id: int
@@ -40,7 +44,9 @@ class IntegrationSubject:
                 uri=None if value.get("uri") is None else str(value["uri"]),
             )
         except (KeyError, TypeError, ValueError) as error:
-            raise SecmanIntegrationError("SecMan returned an invalid integration subject") from error
+            raise SecmanIntegrationError(
+                "SecMan returned an invalid integration subject"
+            ) from error
 
 
 def validate_base_url(value: str) -> str:
@@ -59,13 +65,23 @@ def match_subject(
     subjects: Iterable[IntegrationSubject], target_url: str
 ) -> IntegrationSubject | None:
     """Match an authorized subject by canonical URL, falling back to its host name."""
+    available = tuple(subjects)
     target = urlsplit(target_url)
-    for subject in subjects:
-        if subject.uri and subject.uri.rstrip("/") == target_url.rstrip("/"):
-            return subject
-        if subject.name.lower() == (target.hostname or "").lower():
-            return subject
-    return None
+    exact = tuple(
+        subject
+        for subject in available
+        if subject.uri and subject.uri.rstrip("/") == target_url.rstrip("/")
+    )
+    if len(exact) > 1:
+        raise AmbiguousSubject("multiple SecMan subjects match the target URI")
+    if exact:
+        return exact[0]
+    hostname = tuple(
+        subject for subject in available if subject.name.lower() == (target.hostname or "").lower()
+    )
+    if len(hostname) > 1:
+        raise AmbiguousSubject("multiple SecMan subjects match the target hostname")
+    return hostname[0] if hostname else None
 
 
 def _timestamp(value: datetime) -> str:
@@ -104,9 +120,13 @@ def build_run_body(
     """Build a deterministic terminal snapshot using SecMan's version-1 schema."""
     if subject.scanner_id != scanner_id:
         raise SecmanIntegrationError("integration subject belongs to a different scanner")
-    findings = [] if result.status.value == "FAILED" else [
-        _finding_body(finding) for finding in result.findings
-    ]
+    findings = (
+        []
+        if result.status.value == "FAILED"
+        else [_finding_body(finding) for finding in result.findings]
+    )
+    if len(findings) > 500:
+        raise SecmanIntegrationError("integration run exceeds the 500-finding limit")
     findings.sort(key=lambda finding: str(finding["externalId"]))
     external_ids = [finding["externalId"] for finding in findings]
     if len(external_ids) != len(set(external_ids)):
@@ -137,7 +157,32 @@ class IntegrationClient:
             headers={"Authorization": f"Bearer {token}"},
             timeout=_TIMEOUT_SECONDS,
             follow_redirects=False,
+            trust_env=False,
         )
+
+    @classmethod
+    def login(cls, base_url: str, username: str, password: str) -> IntegrationClient:
+        if not username or not password:
+            raise SecmanIntegrationError("SecMan credentials must not be empty")
+        instance = cls.__new__(cls)
+        instance._client = httpx.Client(
+            base_url=validate_base_url(base_url),
+            timeout=_TIMEOUT_SECONDS,
+            follow_redirects=False,
+            trust_env=False,
+        )
+        try:
+            response = instance._client.post(
+                "/api/auth/login",
+                json={"username": username, "password": password},
+            )
+        except httpx.HTTPError as error:
+            instance.close()
+            raise SecmanIntegrationError("SecMan login request failed") from error
+        if response.status_code not in {200, 204}:
+            instance.close()
+            raise SecmanIntegrationError(f"SecMan login failed with HTTP {response.status_code}")
+        return instance
 
     def close(self) -> None:
         self._client.close()
@@ -154,10 +199,13 @@ class IntegrationClient:
         subjects: list[IntegrationSubject] = []
         page = 0
         while True:
-            response = self._client.get(
-                f"/api/integrations/v1/scanners/{scanner_id}/subjects",
-                params={"page": page, "size": size},
-            )
+            try:
+                response = self._client.get(
+                    f"/api/integrations/v1/scanners/{scanner_id}/subjects",
+                    params={"page": page, "size": size},
+                )
+            except httpx.HTTPError as error:
+                raise SecmanIntegrationError("SecMan subject discovery request failed") from error
             if response.status_code != 200:
                 raise SecmanIntegrationError(
                     f"SecMan subject discovery failed with HTTP {response.status_code}"
@@ -175,7 +223,10 @@ class IntegrationClient:
                 return subjects
 
     def submit_run(self, body: Mapping[str, Any]) -> dict[str, Any]:
-        response = self._client.post("/api/integrations/v1/runs", json=dict(body))
+        try:
+            response = self._client.post("/api/integrations/v1/runs", json=dict(body))
+        except httpx.HTTPError as error:
+            raise SecmanIntegrationError("SecMan run submission request failed") from error
         if response.status_code not in {200, 201}:
             raise SecmanIntegrationError(
                 f"SecMan run submission failed with HTTP {response.status_code}"

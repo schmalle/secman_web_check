@@ -1,0 +1,6 @@
+include .env.example
+include uv.lock
+recursive-include db *.sql
+recursive-include docs *.md
+recursive-include examples *.toml *.txt
+recursive-include scripts *.sh

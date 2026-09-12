@@ -1,6 +1,6 @@
 [build-system]
-requires = ["hatchling>=1.25"]
-build-backend = "hatchling.build"
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
 
 [project]
 name = "secman-web-check"
@@ -26,7 +26,15 @@ dev = [
 ]
 
 [project.scripts]
-secman-web-check = "secman_web_check.__main__:main"
+secman-web-check = "secman_web_check.cli:app"
+
+[tool.setuptools]
+packages = [
+  "secman_web_check",
+  "secman_web_check.checks",
+  "secman_web_check.reports",
+]
+package-dir = { secman_web_check = "src" }
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -34,6 +42,9 @@ testpaths = ["tests"]
 [tool.ruff]
 target-version = "py312"
 line-length = 100
+
+[tool.ruff.lint.isort]
+known-first-party = ["secman_web_check"]
 
 [tool.mypy]
 files = ["src"]

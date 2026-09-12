@@ -171,9 +171,10 @@ def resolve_allowed(
 ) -> tuple[str, ...]:
     """Resolve a target only when every DNS answer is allowed by policy."""
     port = target.port if target.port is not None else (443 if target.scheme == "https" else 80)
-    answers = cast(list[tuple[object, object, int, str, tuple[str, ...]]], resolver(
-        target.host, port, socket.AF_UNSPEC, socket.SOCK_STREAM
-    ))
+    answers = cast(
+        list[tuple[object, object, int, str, tuple[str, ...]]],
+        resolver(target.host, port, socket.AF_UNSPEC, socket.SOCK_STREAM),
+    )
     if not answers:
         raise AddressDenied(f"target {target.host} did not resolve to an address")
 
@@ -203,6 +204,8 @@ def _normalize_host(host: str) -> str:
         normalized = host.encode("idna").decode("ascii").lower()
     except UnicodeError as error:
         raise TargetError("target host is invalid") from error
-    if not normalized or any(character.isspace() or ord(character) < 32 for character in normalized):
+    if not normalized or any(
+        character.isspace() or ord(character) < 32 for character in normalized
+    ):
         raise TargetError("target host is invalid")
     return normalized

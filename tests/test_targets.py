@@ -53,7 +53,10 @@ def test_load_targets_skips_comments_and_preserves_first_normalized_url(tmp_path
 
     targets = load_targets("https://example.com/", path)
 
-    assert tuple(target.url for target in targets) == ("https://example.com/", "http://example.com/")
+    assert tuple(target.url for target in targets) == (
+        "https://example.com/",
+        "http://example.com/",
+    )
 
 
 def test_private_addresses_require_opt_in() -> None:

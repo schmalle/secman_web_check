@@ -1,9 +1,11 @@
 from datetime import UTC, datetime
 
 import httpx
+import pytest
 
 from secman_web_check.models import Finding, Severity, TargetResult, TargetStatus
 from secman_web_check.secman import (
+    AmbiguousSubject,
     IntegrationClient,
     IntegrationSubject,
     SecmanIntegrationError,
@@ -54,6 +56,15 @@ def test_match_subject_accepts_canonical_uri_or_host() -> None:
 
     assert match_subject([uri], "https://example.com/") == uri
     assert match_subject([host], "https://example.com/path") == host
+
+
+def test_match_subject_rejects_ambiguous_hostname() -> None:
+    subjects = [
+        IntegrationSubject(1, 4, 8, "example.com", "https://example.com/a"),
+        IntegrationSubject(2, 4, 9, "example.com", "https://example.com/b"),
+    ]
+    with pytest.raises(AmbiguousSubject):
+        match_subject(subjects, "https://example.com/")
 
 
 def test_client_uses_bearer_auth_without_following_redirects() -> None:
