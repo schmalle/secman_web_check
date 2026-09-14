@@ -1,0 +1,9 @@
+[scan]
+# Conservative defaults. These settings never enable active or private scanning.
+concurrency = 4
+active = false
+allow_private_targets = false
+max_body_bytes = 1048576
+max_redirects = 5
+connect_timeout_seconds = 10.0
+read_timeout_seconds = 20.0

@@ -53,7 +53,54 @@ def test_load_targets_skips_comments_and_preserves_first_normalized_url(tmp_path
 
     targets = load_targets("https://example.com/", path)
 
-    assert tuple(target.url for target in targets) == ("https://example.com/", "http://example.com/")
+    assert tuple(target.url for target in targets) == (
+        "https://example.com/",
+        "http://example.com/",
+    )
+
+
+def test_load_targets_csv_retains_validated_aws_account_numbers(tmp_path: Path) -> None:
+    path = tmp_path / "targets.csv"
+    path.write_text(
+        "awsAccountNumber,target\n111122223333,example.com\n444455556666,https://other.example/path\n",
+        encoding="utf-8",
+    )
+
+    targets = load_targets(None, None, path)
+
+    assert [(target.aws_account_number, target.url) for target in targets] == [
+        ("111122223333", "https://example.com/"),
+        ("444455556666", "https://other.example/path"),
+    ]
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "account,target\n111122223333,example.com\n",
+        "AWS Account Number,TARGET\n111122223333,example.com\n",
+        "awsAccountNumber,target\n123,example.com\n",
+        "awsAccountNumber,target\n111122223333,\n",
+        "awsAccountNumber,target\n111122223333,example.com,extra\n",
+    ],
+)
+def test_load_targets_csv_rejects_malformed_rows(tmp_path: Path, content: str) -> None:
+    path = tmp_path / "targets.csv"
+    path.write_text(content, encoding="utf-8")
+
+    with pytest.raises(TargetError):
+        load_targets(None, None, path)
+
+
+def test_load_targets_csv_rejects_one_target_assigned_to_two_accounts(tmp_path: Path) -> None:
+    path = tmp_path / "targets.csv"
+    path.write_text(
+        "awsAccountNumber,target\n111122223333,example.com\n444455556666,EXAMPLE.COM\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(TargetError, match="more than one AWS account"):
+        load_targets(None, None, path)
 
 
 def test_private_addresses_require_opt_in() -> None:
