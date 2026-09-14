@@ -91,15 +91,29 @@ It does not imply `--active`.
 
 ## Targets
 
-Supply exactly one positional target or one `--targets-file`. Hostnames without a scheme
-use HTTPS. Target files are UTF-8, one URL or hostname per line; blank lines and lines
-beginning with `#` are ignored, and normalized duplicates are removed.
+Supply exactly one positional target, one `--targets-file`, or one `--targets-csv`.
+Hostnames without a scheme use HTTPS. Plain target files are UTF-8, one URL or hostname
+per line; blank lines and lines beginning with `#` are ignored, and normalized
+duplicates are removed.
 
 ```bash
 secman-web-check scan example.com
 secman-web-check scan https://example.com/application/health
 secman-web-check scan --targets-file examples/targets.txt
+secman-web-check scan --targets-csv testdata/targets-aws.csv
 ```
+
+AWS target CSV files use this exact header and one account/target pair per row:
+
+```csv
+awsAccountNumber,target
+111122223333,https://example.com/
+444455556666,service.example.org
+```
+
+Account numbers must contain exactly 12 digits. The account number is retained in JSON
+reports and narrows SecMan subject matching before URI or hostname matching. A normalized
+target cannot be assigned to two different accounts in the same file.
 
 User information, URL fragments, non-HTTP schemes, and denied network addresses are
 rejected. Every DNS answer and redirect is revalidated. Approved connections pin the
@@ -172,6 +186,26 @@ uv run --locked secman-web-check scan https://example.com \
 Uploads use `/api/integrations/v1`, never fall back to legacy ingestion, and submit each
 target as an atomic snapshot. Partial or failed coverage never resolves older findings.
 See [SecMan integration](docs/SECMAN.md).
+
+To resolve the SecMan credentials with Proton Pass, copy the reference-only example,
+replace its item paths, log in once, and use the wrapper. It always enables direct
+SecMan upload:
+
+```bash
+cp examples/secman-proton-pass.env .env
+${EDITOR:-vi} .env
+pass-cli login
+./scripts/scan-with-proton-pass.sh \
+  --targets-csv testdata/targets-aws.csv \
+  --format json \
+  --output-dir scan-output \
+  --fail-on none
+```
+
+Use `--env-file FILE` (or `SECMAN_WEB_CHECK_PASS_ENV_FILE`) for another reference file.
+`SECMAN_PASS_CLI` may name a non-default `pass-cli` executable. Resolved secrets remain
+in the child process environment and are never added to the scanner command line.
+The ready-to-edit CSV used above is stored at `testdata/targets-aws.csv`.
 
 ## Development and verification
 

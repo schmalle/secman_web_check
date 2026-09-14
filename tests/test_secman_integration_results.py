@@ -67,6 +67,28 @@ def test_match_subject_rejects_ambiguous_hostname() -> None:
         match_subject(subjects, "https://example.com/")
 
 
+def test_match_subject_uses_aws_account_before_uri_or_hostname() -> None:
+    first = IntegrationSubject(1, 4, 8, "example.com", "https://example.com/", "111122223333")
+    second = IntegrationSubject(2, 4, 9, "example.com", "https://example.com/", "444455556666")
+
+    assert (
+        match_subject(
+            [first, second],
+            "https://example.com/",
+            aws_account_number="444455556666",
+        )
+        == second
+    )
+    assert (
+        match_subject(
+            [first, second],
+            "https://example.com/",
+            aws_account_number="999900001111",
+        )
+        is None
+    )
+
+
 def test_client_uses_bearer_auth_without_following_redirects() -> None:
     requests: list[httpx.Request] = []
 
@@ -83,6 +105,7 @@ def test_client_uses_bearer_auth_without_following_redirects() -> None:
                             "assetId": 3,
                             "name": "example.com",
                             "uri": "https://example.com/",
+                            "cloudAccountId": "111122223333",
                         }
                     ],
                     "totalPages": 1,
@@ -102,6 +125,7 @@ def test_client_uses_bearer_auth_without_following_redirects() -> None:
         response = client.submit_run({"scannerId": 1})
 
     assert subjects[0].name == "example.com"
+    assert subjects[0].cloud_account_id == "111122223333"
     assert response["id"] == 7
     assert all(request.headers["Authorization"] == "Bearer secret-token" for request in requests)
 

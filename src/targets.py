@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import csv
 import ipaddress
 import re
 import socket
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import cast
 from urllib.parse import SplitResult, urlsplit, urlunsplit
@@ -75,6 +76,7 @@ class NormalizedTarget:
     scheme: str
     host: str
     port: int | None
+    aws_account_number: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -143,25 +145,55 @@ def normalize_target(value: str) -> NormalizedTarget:
     return NormalizedTarget(url=url, scheme=scheme, host=host, port=port)
 
 
-def load_targets(single: str | None, file: Path | None) -> tuple[NormalizedTarget, ...]:
-    """Load unique normalized targets from an optional argument and line-oriented file."""
-    values: list[str] = []
+def load_targets(
+    single: str | None,
+    file: Path | None,
+    csv_file: Path | None = None,
+) -> tuple[NormalizedTarget, ...]:
+    """Load unique normalized targets from one supported input source."""
+    values: list[tuple[str, str | None]] = []
     if single is not None:
-        values.append(single)
+        values.append((single, None))
     if file is not None:
         for line in file.read_text(encoding="utf-8").splitlines():
             stripped = line.strip()
             if stripped and not stripped.startswith("#"):
-                values.append(stripped)
+                values.append((stripped, None))
+    if csv_file is not None:
+        values.extend(_load_csv_values(csv_file))
 
     targets: list[NormalizedTarget] = []
-    seen: set[str] = set()
-    for value in values:
-        target = normalize_target(value)
+    seen: dict[str, str | None] = {}
+    for value, aws_account_number in values:
+        target = replace(normalize_target(value), aws_account_number=aws_account_number)
+        previous_account = seen.get(target.url)
+        if target.url in seen and previous_account != aws_account_number:
+            raise TargetError(f"target {target.url} is assigned to more than one AWS account")
         if target.url not in seen:
-            seen.add(target.url)
+            seen[target.url] = aws_account_number
             targets.append(target)
     return tuple(targets)
+
+
+def _load_csv_values(path: Path) -> list[tuple[str, str]]:
+    """Read AWS account and target pairs from a header-based CSV file."""
+    with path.open(encoding="utf-8-sig", newline="") as source:
+        reader = csv.DictReader(source)
+        if reader.fieldnames != ["awsAccountNumber", "target"]:
+            raise TargetError("target CSV header must be exactly awsAccountNumber,target")
+
+        values: list[tuple[str, str]] = []
+        for line_number, row in enumerate(reader, start=2):
+            if None in row:
+                raise TargetError(f"target CSV row {line_number} has too many columns")
+            account = (row.get("awsAccountNumber") or "").strip()
+            target = (row.get("target") or "").strip()
+            if not re.fullmatch(r"[0-9]{12}", account):
+                raise TargetError(f"target CSV row {line_number} has an invalid AWS account number")
+            if not target:
+                raise TargetError(f"target CSV row {line_number} has an empty target")
+            values.append((target, account))
+    return values
 
 
 def resolve_allowed(

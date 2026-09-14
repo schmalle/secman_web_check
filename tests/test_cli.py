@@ -24,16 +24,31 @@ def clean_run(targets, _config):
 def test_help_documents_safety_and_integration_opt_ins():
     result = runner.invoke(app, ["scan", "--help"])
     assert result.exit_code == 0
-    for option in ("--active", "--allow-private-targets", "--store-db", "--push-to-secman"):
+    for option in (
+        "--active",
+        "--allow-private-targets",
+        "--store-db",
+        "--push-to-secman",
+        "--targets-csv",
+    ):
         assert option in result.output
 
 
 def test_scan_rejects_missing_or_conflicting_target_sources(tmp_path):
     targets = tmp_path / "targets.txt"
     targets.write_text("example.com\n")
+    targets_csv = tmp_path / "targets.csv"
+    targets_csv.write_text("awsAccountNumber,target\n111122223333,example.com\n")
     assert runner.invoke(app, ["scan"]).exit_code == 2
     assert (
         runner.invoke(app, ["scan", "example.com", "--targets-file", str(targets)]).exit_code == 2
+    )
+    assert (
+        runner.invoke(
+            app,
+            ["scan", "--targets-file", str(targets), "--targets-csv", str(targets_csv)],
+        ).exit_code
+        == 2
     )
 
 
@@ -55,3 +70,30 @@ def test_single_target_writes_all_reports_without_network(monkeypatch, tmp_path)
     assert result.exit_code == 0, result.output
     assert len(list(tmp_path.glob("*.json"))) == 2
     assert len(list(tmp_path.glob("*.html"))) == 1
+
+
+def test_csv_scan_can_submit_results_directly_to_secman(monkeypatch, tmp_path):
+    targets_csv = tmp_path / "targets.csv"
+    targets_csv.write_text("awsAccountNumber,target\n111122223333,example.com\n")
+    uploads = []
+    monkeypatch.setattr("secman_web_check.cli.scan_all", clean_run)
+    monkeypatch.setattr(
+        "secman_web_check.cli._push_to_secman",
+        lambda run, *, active: uploads.append((run, active)),
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "scan",
+            "--targets-csv",
+            str(targets_csv),
+            "--push-to-secman",
+            "--fail-on",
+            "none",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert uploads[0][0].targets[0].target.aws_account_number == "111122223333"
+    assert uploads[0][1] is False

@@ -92,7 +92,11 @@ def _push_to_secman(run: ScanRun, *, active: bool) -> None:
         failed_hosts: list[str] = []
         for result in run.targets:
             try:
-                subject = match_subject(subjects, result.target.url)
+                subject = match_subject(
+                    subjects,
+                    result.target.url,
+                    aws_account_number=result.target.aws_account_number,
+                )
                 if subject is None:
                     raise SecmanIntegrationError("no authorized subject matched")
                 body = build_run_body(
@@ -102,6 +106,7 @@ def _push_to_secman(run: ScanRun, *, active: bool) -> None:
                     metadata={
                         "scannerVersion": "0.1.0",
                         "mode": "active" if active else "passive",
+                        "awsAccountNumber": result.target.aws_account_number,
                     },
                 )
                 client.submit_run(body)
@@ -122,6 +127,13 @@ def scan(
     targets_file: Annotated[
         Path | None,
         typer.Option("--targets-file", help="UTF-8 file with one explicit target per line."),
+    ] = None,
+    targets_csv: Annotated[
+        Path | None,
+        typer.Option(
+            "--targets-csv",
+            help="CSV file with the exact header awsAccountNumber,target.",
+        ),
     ] = None,
     config: Annotated[
         Path | None,
@@ -168,8 +180,8 @@ def scan(
     ] = "high",
 ) -> None:
     """Scan one target or a target file and produce normalized reports."""
-    if (target is None) == (targets_file is None):
-        raise typer.BadParameter("provide exactly one target or --targets-file")
+    if sum(source is not None for source in (target, targets_file, targets_csv)) != 1:
+        raise typer.BadParameter("provide exactly one target, --targets-file, or --targets-csv")
     requested = tuple(formats or ("terminal",))
     if "all" in requested:
         requested = ("terminal", "json", "sarif", "html")
@@ -187,7 +199,7 @@ def scan(
             active=True if active else None,
             allow_private_targets=True if allow_private_targets else None,
         )
-        targets = load_targets(target, targets_file)
+        targets = load_targets(target, targets_file, targets_csv)
     except (OSError, TypeError, ValueError, TargetError) as error:
         raise typer.BadParameter(str(error)) from error
     if not targets:

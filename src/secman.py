@@ -32,6 +32,7 @@ class IntegrationSubject:
     asset_id: int
     name: str
     uri: str | None
+    cloud_account_id: str | None = None
 
     @classmethod
     def from_api(cls, value: Mapping[str, Any]) -> IntegrationSubject:
@@ -42,6 +43,9 @@ class IntegrationSubject:
                 asset_id=int(value["assetId"]),
                 name=str(value["name"]),
                 uri=None if value.get("uri") is None else str(value["uri"]),
+                cloud_account_id=(
+                    None if value.get("cloudAccountId") is None else str(value["cloudAccountId"])
+                ),
             )
         except (KeyError, TypeError, ValueError) as error:
             raise SecmanIntegrationError(
@@ -62,10 +66,17 @@ def validate_base_url(value: str) -> str:
 
 
 def match_subject(
-    subjects: Iterable[IntegrationSubject], target_url: str
+    subjects: Iterable[IntegrationSubject],
+    target_url: str,
+    *,
+    aws_account_number: str | None = None,
 ) -> IntegrationSubject | None:
-    """Match an authorized subject by canonical URL, falling back to its host name."""
+    """Match by AWS account when supplied, then canonical URL or hostname."""
     available = tuple(subjects)
+    if aws_account_number is not None:
+        available = tuple(
+            subject for subject in available if subject.cloud_account_id == aws_account_number
+        )
     target = urlsplit(target_url)
     exact = tuple(
         subject

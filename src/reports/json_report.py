@@ -33,6 +33,7 @@ def _finding_document(finding: Finding) -> dict[str, Any]:
 def _target_document(target: TargetResult) -> dict[str, Any]:
     return {
         "url": target.target.url,
+        "awsAccountNumber": target.target.aws_account_number,
         "status": target.status.value,
         "complete": target.complete,
         "errors": list(target.errors),

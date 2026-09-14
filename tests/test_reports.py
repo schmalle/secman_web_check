@@ -1,4 +1,5 @@
 import json
+from dataclasses import replace
 from datetime import UTC, datetime
 
 from rich.console import Console
@@ -9,7 +10,7 @@ from secman_web_check.targets import normalize_target
 
 
 def sample_run():
-    target = normalize_target("https://example.com")
+    target = replace(normalize_target("https://example.com"), aws_account_number="111122223333")
     finding = Finding.create(
         "WEB-TEST",
         target.url,
@@ -36,7 +37,9 @@ def test_reports_share_finding_identity_and_html_escapes(tmp_path):
     assert "<script>alert(1)</script>" not in html
     assert "&lt;script&gt;alert(1)&lt;/script&gt;" in html
     assert "default-src 'none'" in html
-    assert json.loads(json_path.read_text())["schemaVersion"] == "1.0"
+    json_report = json.loads(json_path.read_text())
+    assert json_report["schemaVersion"] == "1.0"
+    assert json_report["targets"][0]["awsAccountNumber"] == "111122223333"
     assert json.loads(sarif_path.read_text())["version"] == "2.1.0"
 
 

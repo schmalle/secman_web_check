@@ -31,3 +31,8 @@ SecMan environment variables:
 
 Load secrets from a secret manager into the process environment. Do not commit a filled
 `.env` file or pass secrets as shell arguments.
+
+For Proton Pass, put only `pass://...` references in an environment file and run
+`./scripts/scan-with-proton-pass.sh`. The wrapper uses `.env` by default, accepts
+`--env-file FILE`, honors `SECMAN_WEB_CHECK_PASS_ENV_FILE`, and can use a custom
+`SECMAN_PASS_CLI` executable. It always adds `--push-to-secman`.

@@ -12,7 +12,7 @@ The JSON hierarchy is:
 
 ```text
 runId, startedAt, completedAt
-└── targets[]: url, status, complete, errors[], timestamps
+└── targets[]: url, awsAccountNumber, status, complete, errors[], timestamps
     └── findings[]: ruleId, externalId, severity, confidence, title,
                     description, recommendation, evidence, url, createdAt
 ```
@@ -20,3 +20,6 @@ runId, startedAt, completedAt
 Reports contain normalized findings and sanitized stage errors. They never contain raw
 HTTP response bodies, unredacted cookie values, authorization headers, passwords, or
 SecMan tokens.
+
+`awsAccountNumber` is a nullable string. It is populated when the target came from
+`--targets-csv` and omitted as `null` for positional and plain-file targets.
