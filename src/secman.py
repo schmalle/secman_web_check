@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import ssl
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import datetime
@@ -11,10 +12,16 @@ from typing import Any, Self
 from urllib.parse import urlsplit, urlunsplit
 
 import httpx
+import truststore
 
 from .models import Finding, TargetResult
 
 _TIMEOUT_SECONDS = 30.0
+
+
+def _system_ca_context() -> ssl.SSLContext:
+    """Use the native OS trust store while retaining TLS and hostname verification."""
+    return truststore.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
 
 
 class SecmanIntegrationError(RuntimeError):
@@ -112,8 +119,8 @@ def _finding_body(finding: Finding) -> dict[str, Any]:
         "lineRange": None,
         "url": finding.url,
         "confidence": finding.confidence,
-        "engine": "secman-web-check",
-        "model": None,
+        "engine": finding.engine,
+        "model": finding.model,
         "commitSha": None,
         "issueUrl": None,
         "fixPrUrl": None,
@@ -166,6 +173,7 @@ class IntegrationClient:
         self._client = httpx.Client(
             base_url=validate_base_url(base_url),
             headers={"Authorization": f"Bearer {token}"},
+            verify=_system_ca_context(),
             timeout=_TIMEOUT_SECONDS,
             follow_redirects=False,
             trust_env=False,
@@ -178,6 +186,7 @@ class IntegrationClient:
         instance = cls.__new__(cls)
         instance._client = httpx.Client(
             base_url=validate_base_url(base_url),
+            verify=_system_ca_context(),
             timeout=_TIMEOUT_SECONDS,
             follow_redirects=False,
             trust_env=False,

@@ -26,8 +26,17 @@ MariaDB environment variables:
 
 SecMan environment variables:
 
-- Required: `SECMAN_URL` using HTTPS and `SECMAN_SCANNER_ID`.
+- Required: `SECMAN_URL` using HTTPS.
+- Scanner IDs: `SECMAN_SECURITY_SCANNER_ID` for security mode and
+  `SECMAN_VISUAL_SCANNER_ID` for visual mode. A single-mode run may use the legacy
+  `SECMAN_SCANNER_ID`; combined runs deliberately require both mode-specific IDs.
 - Authentication: `SECMAN_TOKEN`, or both `SECMAN_USERNAME` and `SECMAN_PASSWORD`.
+
+Visual analysis environment variables:
+
+- `SECMAN_VISION_API_KEY`: required unless `--visual-no-ai` is selected.
+- `SECMAN_VISION_MODEL`: optional model slug.
+- `SECMAN_VISION_BASE_URL`: optional public HTTPS OpenAI-compatible API base URL.
 
 Load secrets from a secret manager into the process environment. Do not commit a filled
 `.env` file or pass secrets as shell arguments.
@@ -36,3 +45,8 @@ For Proton Pass, put only `pass://...` references in an environment file and run
 `./scripts/scan-with-proton-pass.sh`. The wrapper uses `.env` by default, accepts
 `--env-file FILE`, honors `SECMAN_WEB_CHECK_PASS_ENV_FILE`, and can use a custom
 `SECMAN_PASS_CLI` executable. It always adds `--push-to-secman`.
+
+For production AWS workloads, store an allowlisted JSON object in Secrets Manager and
+run `scripts/scan-with-aws-secrets.py --secret-id NAME -- SCAN_ARGS`. The wrapper uses
+the standard AWS CLI credential chain, rejects unknown secret keys, places values only
+in the scanner child environment, and always adds `--push-to-secman`.

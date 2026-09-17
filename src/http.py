@@ -123,6 +123,11 @@ class _PinnedTransport(httpx.HTTPTransport):
         )
 
 
+def pinned_transport(target: NormalizedTarget, addresses: tuple[str, ...]) -> httpx.HTTPTransport:
+    """Build a verified synchronous transport that can dial only approved IP literals."""
+    return _PinnedTransport(PinnedNetworkBackend(target, addresses))
+
+
 class _SingleHopClient(httpx.Client):
     def _build_redirect_request(
         self, request: httpx.Request, response: httpx.Response

@@ -3,9 +3,11 @@
 SecMan upload is disabled unless `--push-to-secman` is supplied. This is the direct
 result-import path; no separate export/import step is required.
 
-1. Register an integration scanner whose source is `WEB_SECURITY`.
-2. Assign its service user and bind only authorized asset subjects.
-3. Set `SECMAN_URL` to the HTTPS origin and `SECMAN_SCANNER_ID` to the registration ID.
+1. Register a `WEB_SECURITY` scanner for security results and a `VISUAL` scanner for
+   visual results.
+2. Assign their service users and bind only authorized asset subjects.
+3. Set `SECMAN_URL` to the HTTPS origin plus `SECMAN_SECURITY_SCANNER_ID` and/or
+   `SECMAN_VISUAL_SCANNER_ID` for the selected modes.
 4. Set `SECMAN_TOKEN`, or set `SECMAN_USERNAME` and `SECMAN_PASSWORD`.
 5. Run a local JSON report first, then repeat with `--push-to-secman`.
 
@@ -24,6 +26,12 @@ findings. Stable external IDs and deterministic run keys make a retry idempotent
 TLS verification is mandatory. Authentication failures and response errors are
 sanitized; tokens, passwords, cookies, and raw web response bodies are not uploaded.
 
+Security and visual results intentionally use separate scanner registrations. A
+combined run submits two atomic snapshots; the merged local report is not uploaded as
+a third snapshot. This prevents a security-only run from resolving visual findings, or
+the reverse. `SECMAN_SCANNER_ID` remains a compatibility fallback only for a
+single-mode run.
+
 ## Proton Pass credentials
 
 The wrapper follows SecMan's `scripts/import.sh` pattern: `pass-cli` resolves references
@@ -40,10 +48,26 @@ pass-cli login
   --fail-on none
 ```
 
-The reference file must resolve `SECMAN_URL`, `SECMAN_SCANNER_ID`, and either
+The reference file must resolve `SECMAN_URL`, the scanner ID(s) required by the chosen
+mode, and either
 `SECMAN_TOKEN` or the pair `SECMAN_USERNAME` and `SECMAN_PASSWORD`. Do not put resolved
 passwords or tokens in the file. Select another file with `--env-file FILE` or
 `SECMAN_WEB_CHECK_PASS_ENV_FILE`; select another executable with `SECMAN_PASS_CLI`.
+
+## AWS Secrets Manager credentials
+
+For production, store the required variables in one JSON `SecretString`. Supported
+keys are the SecMan URL, scanner IDs, token or username/password, and optional vision
+provider settings. Then run:
+
+```bash
+./scripts/scan-with-aws-secrets.py --secret-id prod/secman/web-check -- \
+  https://example.com --scan-mode both --format json --fail-on none
+```
+
+The script relies on the standard AWS CLI credential chain, rejects unknown JSON keys,
+does not echo the secret response, and passes resolved values only in the child process
+environment.
 
 ## AWS target CSV
 

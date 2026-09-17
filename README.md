@@ -1,8 +1,8 @@
 # SecMan web-security check
 
-`secman-web-check` is an authorized, bounded scanner for HTTP response policy, TLS
-configuration, cookies, CORS, content exposure, and a small opt-in set of active
-misconfiguration probes. It scans only targets you explicitly supply.
+`secman-web-check` is the merged command-line scanner for two selectable approaches:
+bounded HTTP/TLS security checks and headless-browser visual exposure checks. Run
+either approach independently or run both against the same explicit target set.
 
 Redirect chains are reported hop by hop. Cross-host transitions and blocked downgrade,
 invalid, or over-limit redirects receive distinct findings.
@@ -40,6 +40,26 @@ secman-web-check scan https://example.com
 ```
 
 ## Common examples
+
+Select the scan approach explicitly:
+
+```bash
+# HTTP/TLS checks only (the backward-compatible default)
+uv run --locked secman-web-check scan https://example.com --scan-mode security
+
+# Browser screenshot plus vision analysis
+SECMAN_VISION_API_KEY='load-from-your-secret-manager' \
+  uv run --locked secman-web-check scan https://example.com --scan-mode visual
+
+# Security and visual scans in one local report
+uv run --locked secman-web-check scan https://example.com \
+  --scan-mode both --visual-no-ai --format all --fail-on none
+```
+
+`--visual-no-ai` performs deterministic screenshot capture without a model call, so it
+cannot report visual-content findings. Screenshots are written below
+`OUTPUT_DIR/screenshots` unless `--visual-output-dir` is supplied. Full-page captures
+are capped at 4000 pixels.
 
 Scan one public target using safe defaults:
 
@@ -146,7 +166,9 @@ uv run --locked secman-web-check scan --targets-file examples/targets.txt \
   --config examples/config.toml
 ```
 
-Secrets are never accepted as CLI values or TOML settings. See
+Secrets are never accepted as CLI values or TOML settings. Vision credentials use
+`SECMAN_VISION_API_KEY`; optional `SECMAN_VISION_MODEL` and
+`SECMAN_VISION_BASE_URL` select the model/provider. See
 [Configuration reference](docs/CONFIGURATION.md).
 
 ## Optional MariaDB history
@@ -169,16 +191,18 @@ See [MariaDB setup](docs/DATABASE.md) before applying the example grants.
 
 ## Optional SecMan upload
 
-Register the scanner in SecMan with source `WEB_SECURITY`, assign its service user and
-subjects, then set an HTTPS base URL and scanner ID. Authenticate with a bearer token or
-with username/password environment variables.
+Register separate SecMan scanners for independent lifecycle snapshots: source
+`WEB_SECURITY` for security results and source `VISUAL` for visual results. Assign the
+same authorized subjects where appropriate. A combined run requires both IDs so one
+mode can never resolve findings owned by the other.
 
 ```bash
 export SECMAN_URL=https://secman.example.invalid
-export SECMAN_SCANNER_ID=42
+export SECMAN_SECURITY_SCANNER_ID=41
+export SECMAN_VISUAL_SCANNER_ID=42
 export SECMAN_TOKEN='load-from-your-secret-manager'
 
-uv run --locked secman-web-check scan https://example.com \
+uv run --locked secman-web-check scan https://example.com --scan-mode both \
   --format json \
   --push-to-secman
 ```
@@ -207,6 +231,17 @@ Use `--env-file FILE` (or `SECMAN_WEB_CHECK_PASS_ENV_FILE`) for another referenc
 in the child process environment and are never added to the scanner command line.
 The ready-to-edit CSV used above is stored at `testdata/targets-aws.csv`.
 
+For production on AWS, store the same variables as a JSON object in Secrets Manager
+and use the normal AWS credential chain (instance role, task role, or workload
+identity). The wrapper allowlists environment keys and never prints the returned
+secret:
+
+```bash
+./scripts/scan-with-aws-secrets.py \
+  --secret-id prod/secman/web-check -- \
+  https://example.com --scan-mode both --format json --fail-on none
+```
+
 ## Development and verification
 
 The repository intentionally keeps Python source files directly under `src/`; the build
@@ -231,8 +266,9 @@ mock adapters; they do not require a live target, MariaDB instance, or SecMan de
 
 ## Limitations
 
-- No crawling, discovery, authentication testing, browser execution, exploitation,
-  brute force, or arbitrary fuzzing.
+- No crawling, discovery, authentication testing, exploitation, brute force, or
+  arbitrary fuzzing. Visual mode executes the selected page in isolated headless
+  Chromium with outbound destination checks on every request.
 - Active findings use strong bounded signatures but may still require human validation.
 - HTTPS targets use SSLyze for the documented TLS capabilities; unavailable individual
   capabilities make the target partial instead of silently clean.

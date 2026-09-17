@@ -10,7 +10,12 @@ import pytest
 from httpcore._backends.base import NetworkBackend, NetworkStream
 
 from secman_web_check.config import ScannerConfig
-from secman_web_check.http import CollectionError, HttpCollector, PinnedNetworkBackend
+from secman_web_check.http import (
+    CollectionError,
+    HttpCollector,
+    PinnedNetworkBackend,
+    pinned_transport,
+)
 from secman_web_check.targets import AddressDenied, normalize_target
 
 
@@ -325,6 +330,11 @@ def test_read_error_does_not_expose_response_headers():
 def test_backend_rejects_empty_or_nonliteral_pin(addresses):
     with pytest.raises(AddressDenied):
         PinnedNetworkBackend(normalize_target("https://example.com"), addresses)
+
+
+def test_public_pinned_transport_rejects_nonliteral_addresses():
+    with pytest.raises(AddressDenied):
+        pinned_transport(normalize_target("https://example.com"), ("example.com",))
 
 
 def test_backend_cannot_dial_unix_socket():

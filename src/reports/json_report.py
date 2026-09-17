@@ -26,6 +26,8 @@ def _finding_document(finding: Finding) -> dict[str, Any]:
         "recommendation": finding.recommendation,
         "evidence": finding.evidence,
         "url": finding.url,
+        "engine": finding.engine,
+        "model": finding.model,
         "createdAt": _timestamp(finding.created_at),
     }
 

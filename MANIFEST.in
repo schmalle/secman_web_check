@@ -3,5 +3,5 @@ include uv.lock
 recursive-include db *.sql
 recursive-include docs *.md
 recursive-include examples *.toml *.txt *.csv *.env
-recursive-include scripts *.sh
+recursive-include scripts *.sh *.py
 recursive-include testdata *.csv

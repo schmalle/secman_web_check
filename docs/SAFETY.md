@@ -44,8 +44,22 @@ headers, or payloads.
 It never permits loopback, link-local, multicast, unspecified, documentation, or other
 special-purpose ranges, and it does not enable active probes.
 
+## Visual browser boundary
+
+Visual mode starts a fresh headless Chromium context and applies the same address
+policy to the initial page, redirects, frames, and subresources. Media and WebSocket
+requests are disabled; `data:` and `blob:` resources generated inside the selected
+page remain available. The final navigation address is checked again before page text
+or a screenshot is retained. Screenshots are capped at 4000 pixels in height.
+
+Vision analysis is optional and sends the screenshot plus a bounded page-text excerpt
+to the configured public HTTPS provider. The provider credential is read only from the
+process environment. Select `--visual-no-ai` when page content must not leave the
+scanner host.
+
 ## Prohibited behavior
 
 The tool does not crawl, enumerate ports, discover hosts, authenticate, replay cookies,
-brute-force, exploit, execute browser content, upload payloads, or fuzz arbitrary inputs.
+brute-force, exploit, upload payloads, or fuzz arbitrary inputs. Visual mode executes
+only the explicitly selected pages and their policy-approved resources.
 Do not modify it to bypass target policy or TLS verification for operational scans.

@@ -23,6 +23,7 @@ from .secman import (
 )
 from .storage import DatabaseSettings, MariaDbStore, StorageError, connect_database
 from .targets import TargetError, load_targets
+from .visual import VisualOptions, merge_runs, scan_visual_all
 
 app = typer.Typer(
     name="secman-web-check",
@@ -69,11 +70,10 @@ def _write_reports(run: ScanRun, formats: tuple[str, ...], output_dir: Path) -> 
         console.print(f"HTML report: {path}")
 
 
-def _push_to_secman(run: ScanRun, *, active: bool) -> None:
+def _push_to_secman(run: ScanRun, *, active: bool, scanner_id: int, mode: str) -> None:
     try:
         base_url = os.environ["SECMAN_URL"]
-        scanner_id = int(os.environ["SECMAN_SCANNER_ID"])
-    except (KeyError, ValueError) as error:
+    except KeyError as error:
         raise SecmanIntegrationError("SecMan environment configuration is incomplete") from error
     token = os.environ.get("SECMAN_TOKEN")
     if token:
@@ -104,8 +104,9 @@ def _push_to_secman(run: ScanRun, *, active: bool) -> None:
                     subject,
                     result,
                     metadata={
-                        "scannerVersion": "0.1.0",
-                        "mode": "active" if active else "passive",
+                        "scannerVersion": "0.2.0",
+                        "scanMode": mode,
+                        "securityMode": "active" if active else "passive",
                         "awsAccountNumber": result.target.aws_account_number,
                     },
                 )
@@ -116,6 +117,21 @@ def _push_to_secman(run: ScanRun, *, active: bool) -> None:
             raise SecmanIntegrationError(
                 "SecMan upload failed for: " + ", ".join(sorted(set(failed_hosts)))
             )
+
+
+def _scanner_id(mode: str, *, combined: bool) -> int:
+    variable = "SECMAN_SECURITY_SCANNER_ID" if mode == "security" else "SECMAN_VISUAL_SCANNER_ID"
+    value = os.environ.get(variable)
+    if value is None and not combined:
+        value = os.environ.get("SECMAN_SCANNER_ID")
+    try:
+        scanner_id = int(value or "")
+    except ValueError as error:
+        suffix = "; combined scans require both mode-specific IDs" if combined else ""
+        raise SecmanIntegrationError(f"{variable} is missing or invalid{suffix}") from error
+    if scanner_id < 1:
+        raise SecmanIntegrationError(f"{variable} must be a positive integer")
+    return scanner_id
 
 
 @app.command()
@@ -155,6 +171,27 @@ def scan(
         bool,
         typer.Option("--active", help="Enable the fixed allowlist of bounded active probes."),
     ] = False,
+    scan_mode: Annotated[
+        str,
+        typer.Option(
+            "--scan-mode",
+            help="Select security, visual, or both scanning approaches.",
+        ),
+    ] = "security",
+    visual_no_ai: Annotated[
+        bool,
+        typer.Option(
+            "--visual-no-ai",
+            help="Capture screenshots without vision-model finding analysis.",
+        ),
+    ] = False,
+    visual_output_dir: Annotated[
+        Path | None,
+        typer.Option(
+            "--visual-output-dir",
+            help="Screenshot directory (default: OUTPUT_DIR/screenshots).",
+        ),
+    ] = None,
     allow_private_targets: Annotated[
         bool,
         typer.Option(
@@ -182,6 +219,9 @@ def scan(
     """Scan one target or a target file and produce normalized reports."""
     if sum(source is not None for source in (target, targets_file, targets_csv)) != 1:
         raise typer.BadParameter("provide exactly one target, --targets-file, or --targets-csv")
+    scan_mode = scan_mode.lower()
+    if scan_mode not in {"security", "visual", "both"}:
+        raise typer.BadParameter("--scan-mode must be security, visual, or both")
     requested = tuple(formats or ("terminal",))
     if "all" in requested:
         requested = ("terminal", "json", "sarif", "html")
@@ -205,7 +245,34 @@ def scan(
     if not targets:
         raise typer.BadParameter("no usable targets were supplied")
 
-    run = scan_all(targets, scan_config)
+    visual_options = None
+    if scan_mode in {"visual", "both"}:
+        try:
+            visual_options = VisualOptions(
+                output_dir=visual_output_dir or output_dir / "screenshots",
+                analyze=not visual_no_ai,
+                api_key=os.environ.get("SECMAN_VISION_API_KEY"),
+                model=os.environ.get("SECMAN_VISION_MODEL", "anthropic/claude-sonnet-4.5"),
+                base_url=os.environ.get("SECMAN_VISION_BASE_URL", "https://openrouter.ai/api/v1"),
+            )
+        except ValueError as error:
+            raise typer.BadParameter(str(error)) from error
+
+    security_run = scan_all(targets, scan_config) if scan_mode in {"security", "both"} else None
+    visual_run = None
+    if visual_options is not None:
+        try:
+            visual_run = scan_visual_all(targets, scan_config, visual_options)
+        except (OSError, RuntimeError, ValueError) as error:
+            error_console.print(f"[red]Operational error:[/red] {error}")
+            raise typer.Exit(2) from error
+    run: ScanRun | None
+    if security_run is not None and visual_run is not None:
+        run = merge_runs(security_run, visual_run)
+    else:
+        run = security_run or visual_run
+    if run is None:  # pragma: no cover - guarded by scan_mode validation
+        raise typer.Exit(2)
     operational_failure = any(
         result.status in {TargetStatus.PARTIAL, TargetStatus.FAILED} for result in run.targets
     )
@@ -218,7 +285,21 @@ def scan(
             finally:
                 connection.close()
         if push_to_secman:
-            _push_to_secman(run, active=scan_config.active)
+            combined = scan_mode == "both"
+            if security_run is not None:
+                _push_to_secman(
+                    security_run,
+                    active=scan_config.active,
+                    scanner_id=_scanner_id("security", combined=combined),
+                    mode="security",
+                )
+            if visual_run is not None:
+                _push_to_secman(
+                    visual_run,
+                    active=False,
+                    scanner_id=_scanner_id("visual", combined=combined),
+                    mode="visual",
+                )
     except (AmbiguousSubject, OSError, SecmanIntegrationError, StorageError, ValueError) as error:
         error_console.print(f"[red]Operational error:[/red] {error}")
         raise typer.Exit(2) from error

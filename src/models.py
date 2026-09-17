@@ -45,6 +45,8 @@ class Finding:
     recommendation: str
     evidence: str
     url: str
+    engine: str = "secman-web-check"
+    model: str | None = None
     created_at: datetime = field(default_factory=_now)
 
     def __post_init__(self) -> None:
@@ -62,6 +64,8 @@ class Finding:
         description: str = "",
         recommendation: str = "",
         evidence: str = "",
+        engine: str = "secman-web-check",
+        model: str | None = None,
         created_at: datetime | None = None,
     ) -> Finding:
         """Create a finding whose external identity is stable for rule and target."""
@@ -76,6 +80,8 @@ class Finding:
             recommendation=recommendation,
             evidence=evidence,
             url=url,
+            engine=engine,
+            model=model,
             created_at=_now() if created_at is None else created_at,
         )
 
