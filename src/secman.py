@@ -14,7 +14,8 @@ from urllib.parse import urlsplit, urlunsplit
 import httpx
 import truststore
 
-from .models import Finding, TargetResult
+from .models import DetectedComponent, ExposureObservation, Finding, TargetResult
+from .targets import NormalizedTarget, TargetError, normalize_target
 
 _TIMEOUT_SECONDS = 30.0
 
@@ -128,6 +129,56 @@ def _finding_body(finding: Finding) -> dict[str, Any]:
     }
 
 
+def _component_body(component: DetectedComponent) -> dict[str, Any]:
+    return {
+        "componentKey": component.component_key,
+        "category": component.category.value,
+        "name": component.name,
+        "version": component.version,
+        "confidence": component.confidence,
+        "evidenceType": component.evidence_type,
+        "evidence": component.evidence,
+        "sourceUrl": component.source_url,
+    }
+
+
+def _exposure_body(exposure: ExposureObservation) -> dict[str, Any]:
+    return {
+        "configuredUrl": exposure.configured_url,
+        "effectiveUrl": exposure.effective_url,
+        "reachability": exposure.reachability.value,
+        "httpStatus": exposure.http_status,
+        "redirectCount": exposure.redirect_count,
+        "bodyLength": exposure.body_length,
+        "vantagePoint": exposure.vantage_point,
+    }
+
+
+def targets_from_subjects(subjects: Iterable[IntegrationSubject]) -> tuple[NormalizedTarget, ...]:
+    """Convert explicitly bound SecMan subjects into scan targets without guessing URLs."""
+    targets: list[NormalizedTarget] = []
+    for subject in subjects:
+        if subject.uri is None:
+            continue
+        try:
+            target = normalize_target(subject.uri)
+        except TargetError as error:
+            raise SecmanIntegrationError(
+                f"SecMan subject {subject.id} has an invalid HTTP(S) URI"
+            ) from error
+        targets.append(
+            NormalizedTarget(
+                url=target.url,
+                scheme=target.scheme,
+                host=target.host,
+                port=target.port,
+                secman_subject_id=subject.id,
+                secman_asset_id=subject.asset_id,
+            )
+        )
+    return tuple(targets)
+
+
 def build_run_body(
     scanner_id: int,
     subject: IntegrationSubject,
@@ -159,6 +210,17 @@ def build_run_body(
         "metadataJson": json.dumps(metadata or {}, sort_keys=True, separators=(",", ":")),
         "findings": findings,
     }
+    if result.exposure is not None or result.components:
+        if len(result.components) > 500:
+            raise SecmanIntegrationError("integration run exceeds the 500-component limit")
+        body["inventory"] = {
+            "completeCoverage": result.inventory_complete,
+            "exposure": None if result.exposure is None else _exposure_body(result.exposure),
+            "components": [
+                _component_body(component)
+                for component in sorted(result.components, key=lambda item: item.component_key)
+            ],
+        }
     canonical = json.dumps(body, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     body["runKey"] = "secman-web-check-v1:" + hashlib.sha256(canonical.encode()).hexdigest()
     return body

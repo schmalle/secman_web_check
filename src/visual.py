@@ -20,6 +20,7 @@ import httpx
 from .config import ScannerConfig
 from .http import pinned_transport
 from .models import Finding, ScanRun, Severity, TargetResult, TargetStatus
+from .orchestrator import ProgressCallback
 from .targets import (
     AddressDenied,
     AddressPolicy,
@@ -300,14 +301,19 @@ async def _analyze(capture: PageCapture, options: VisualOptions) -> list[Finding
 
 
 async def _scan_visual_async(
-    targets: Sequence[NormalizedTarget], config: ScannerConfig, options: VisualOptions
+    targets: Sequence[NormalizedTarget],
+    config: ScannerConfig,
+    options: VisualOptions,
+    progress: ProgressCallback | None = None,
 ) -> ScanRun:
     started = datetime.now(UTC)
+    completed = 0
     results: list[TargetResult | None] = [None] * len(targets)
     semaphore = asyncio.Semaphore(config.concurrency)
     async with BrowserCapturer(options, config) as capturer:
 
         async def process(index: int, target: NormalizedTarget) -> None:
+            nonlocal completed
             target_started = datetime.now(UTC)
             async with semaphore:
                 capture = await capturer.capture(target, index + 1)
@@ -321,7 +327,7 @@ async def _scan_visual_async(
                 except (httpx.HTTPError, OSError, TypeError, ValueError):
                     errors.append("visual analysis failed")
             complete = not errors
-            results[index] = TargetResult(
+            result = TargetResult(
                 target=target,
                 status=TargetStatus.SUCCESS if complete else TargetStatus.PARTIAL,
                 findings=tuple(findings),
@@ -330,6 +336,10 @@ async def _scan_visual_async(
                 started_at=target_started,
                 completed_at=datetime.now(UTC),
             )
+            results[index] = result
+            completed += 1
+            if progress is not None:
+                progress(completed, len(targets), result)
 
         await asyncio.gather(*(process(index, target) for index, target in enumerate(targets)))
     return ScanRun(
@@ -341,10 +351,14 @@ async def _scan_visual_async(
 
 
 def scan_visual_all(
-    targets: Sequence[NormalizedTarget], config: ScannerConfig, options: VisualOptions
+    targets: Sequence[NormalizedTarget],
+    config: ScannerConfig,
+    options: VisualOptions,
+    *,
+    progress: ProgressCallback | None = None,
 ) -> ScanRun:
     """Capture and optionally analyze all targets while preserving input order."""
-    return asyncio.run(_scan_visual_async(targets, config, options))
+    return asyncio.run(_scan_visual_async(targets, config, options, progress))
 
 
 def merge_runs(security: ScanRun, visual: ScanRun) -> ScanRun:
@@ -361,6 +375,9 @@ def merge_runs(security: ScanRun, visual: ScanRun) -> ScanRun:
                 findings=tuple(
                     {item.external_id: item for item in (*left.findings, *right.findings)}.values()
                 ),
+                components=left.components,
+                exposure=left.exposure,
+                inventory_complete=left.inventory_complete,
                 errors=tuple(dict.fromkeys((*left.errors, *right.errors))),
                 complete=complete,
                 started_at=min(left.started_at, right.started_at),

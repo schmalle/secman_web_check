@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import UTC, datetime
 from uuid import uuid4
@@ -9,11 +10,18 @@ from uuid import uuid4
 from .checks import PASSIVE_CHECKS, CheckContext
 from .checks.active import run_active_checks
 from .checks.redirects import check_redirects
+from .components import detect_components, inventory_response_is_complete, sanitize_inventory_url
 from .config import ScannerConfig
 from .http import CollectionError, HttpCollector
-from .models import ScanRun, TargetResult, TargetStatus
+from .models import ExposureObservation, Reachability, ScanRun, TargetResult, TargetStatus
 from .targets import AddressDenied, NormalizedTarget, normalize_target
 from .tls import TlsScanner
+
+ProgressCallback = Callable[[int, int, TargetResult], None]
+"""Receives (completed count, total count, result) once per finished target."""
+
+_AUTHENTICATED_MARKER_BODY = b'{"message":"Missing Authentication Token"}'
+"""Exact AWS API Gateway body (ignoring surrounding whitespace) of an authenticated endpoint."""
 
 
 def _security_txt_target(target: NormalizedTarget) -> NormalizedTarget:
@@ -43,6 +51,13 @@ def scan_target(
         return TargetResult(
             target=target,
             status=TargetStatus.FAILED,
+            exposure=ExposureObservation(
+                configured_url=sanitize_inventory_url(target.url) or target.url,
+                effective_url=None,
+                reachability=Reachability.UNKNOWN,
+                http_status=None,
+                redirect_count=0,
+            ),
             errors=("HTTP collection failed or target address was denied",),
             complete=False,
             started_at=started,
@@ -77,10 +92,25 @@ def scan_target(
 
     unique = {finding.external_id: finding for finding in findings}
     complete = not errors
+    reachability = (
+        Reachability.AUTHENTICATED
+        if response.body.strip() == _AUTHENTICATED_MARKER_BODY
+        else Reachability.REACHABLE
+    )
     return TargetResult(
         target=target,
         status=TargetStatus.SUCCESS if complete else TargetStatus.PARTIAL,
         findings=tuple(unique.values()),
+        components=detect_components(response),
+        exposure=ExposureObservation(
+            configured_url=sanitize_inventory_url(target.url) or target.url,
+            effective_url=sanitize_inventory_url(response.url),
+            reachability=reachability,
+            http_status=response.status_code,
+            redirect_count=max(0, len(responses) - 1),
+            body_length=len(response.body),
+        ),
+        inventory_complete=inventory_response_is_complete(response),
         errors=tuple(dict.fromkeys(errors)),
         complete=complete,
         started_at=started,
@@ -88,9 +118,15 @@ def scan_target(
     )
 
 
-def scan_all(targets: tuple[NormalizedTarget, ...], config: ScannerConfig) -> ScanRun:
+def scan_all(
+    targets: tuple[NormalizedTarget, ...],
+    config: ScannerConfig,
+    *,
+    progress: ProgressCallback | None = None,
+) -> ScanRun:
     """Scan a bounded target list concurrently without cancelling sibling targets."""
     started = datetime.now(UTC)
+    completed = 0
     results: list[TargetResult | None] = [None] * len(targets)
     with ThreadPoolExecutor(max_workers=config.concurrency) as executor:
         future_indexes = {
@@ -100,10 +136,10 @@ def scan_all(targets: tuple[NormalizedTarget, ...], config: ScannerConfig) -> Sc
         for future in as_completed(future_indexes):
             index = future_indexes[future]
             try:
-                results[index] = future.result()
+                result = future.result()
             except Exception:  # noqa: BLE001 - isolate unexpected failure to one target
                 now = datetime.now(UTC)
-                results[index] = TargetResult(
+                result = TargetResult(
                     target=targets[index],
                     status=TargetStatus.FAILED,
                     errors=("Unexpected target scan failure",),
@@ -111,6 +147,10 @@ def scan_all(targets: tuple[NormalizedTarget, ...], config: ScannerConfig) -> Sc
                     started_at=now,
                     completed_at=now,
                 )
+            results[index] = result
+            completed += 1
+            if progress is not None:
+                progress(completed, len(targets), result)
     return ScanRun(
         run_id=str(uuid4()),
         targets=tuple(result for result in results if result is not None),
@@ -119,4 +159,4 @@ def scan_all(targets: tuple[NormalizedTarget, ...], config: ScannerConfig) -> Sc
     )
 
 
-__all__ = ["scan_all", "scan_target"]
+__all__ = ["ProgressCallback", "scan_all", "scan_target"]

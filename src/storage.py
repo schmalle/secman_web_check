@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
+from .components import sanitize_inventory_url
 from .models import ScanRun
 
 
@@ -55,9 +56,10 @@ class StoredRunSummary:
     completed_at: datetime
     target_count: int
     finding_count: int
+    component_count: int
 
 
-_MIGRATION = """
+_MIGRATION_V1 = """
 CREATE TABLE IF NOT EXISTS schema_version (
   version INT PRIMARY KEY,
   checksum CHAR(64) NOT NULL,
@@ -103,6 +105,40 @@ CREATE TABLE IF NOT EXISTS scan_finding (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
 """.strip()
 
+_MIGRATION_V2 = """
+ALTER TABLE scan_run
+  ADD COLUMN IF NOT EXISTS component_count INT NOT NULL DEFAULT 0;
+ALTER TABLE scan_target
+  ADD COLUMN IF NOT EXISTS effective_url VARCHAR(2048) NULL,
+  ADD COLUMN IF NOT EXISTS reachability VARCHAR(16) NULL,
+  ADD COLUMN IF NOT EXISTS http_status SMALLINT UNSIGNED NULL,
+  ADD COLUMN IF NOT EXISTS redirect_count INT NOT NULL DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS vantage_point VARCHAR(100) NULL,
+  ADD COLUMN IF NOT EXISTS inventory_complete BOOLEAN NOT NULL DEFAULT FALSE;
+CREATE TABLE IF NOT EXISTS scan_component (
+  id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  scan_target_id BIGINT UNSIGNED NOT NULL,
+  component_key VARCHAR(128) COLLATE utf8mb4_bin NOT NULL,
+  category VARCHAR(32) NOT NULL,
+  name VARCHAR(255) NOT NULL,
+  version VARCHAR(100) NULL,
+  confidence DOUBLE NOT NULL,
+  evidence_type VARCHAR(32) NOT NULL,
+  evidence VARCHAR(512) NOT NULL,
+  source_url VARCHAR(2048) NULL,
+  UNIQUE KEY uq_scan_component_target_key (scan_target_id, component_key),
+  KEY ix_scan_component_category_name (category, name),
+  CONSTRAINT fk_scan_component_target FOREIGN KEY (scan_target_id) REFERENCES scan_target(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+""".strip()
+
+_MIGRATION_V3 = """
+ALTER TABLE scan_target
+  ADD COLUMN IF NOT EXISTS body_length INT UNSIGNED NULL
+""".strip()
+
+_MIGRATIONS = ((1, _MIGRATION_V1), (2, _MIGRATION_V2), (3, _MIGRATION_V3))
+
 
 def connect_database(settings: DatabaseSettings) -> Any:
     try:
@@ -128,25 +164,27 @@ class MariaDbStore:
         self.connection = connection
 
     def install(self) -> None:
-        checksum = hashlib.sha256(_MIGRATION.encode()).hexdigest()
         cursor = self.connection.cursor()
         try:
-            statements = tuple(
-                statement.strip() for statement in _MIGRATION.split(";") if statement.strip()
-            )
-            cursor.execute(statements[0])
-            cursor.execute("SELECT checksum FROM schema_version WHERE version = %s", (1,))
-            row = cursor.fetchone()
-            if row is not None:
-                existing = row[0] if not isinstance(row, dict) else row["checksum"]
-                if existing != checksum:
-                    raise StorageError("MariaDB migration checksum mismatch")
-            else:
-                for statement in statements[1:]:
+            schema_statement = _MIGRATION_V1.split(";", 1)[0].strip()
+            cursor.execute(schema_statement)
+            for version, migration in _MIGRATIONS:
+                checksum = hashlib.sha256(migration.encode()).hexdigest()
+                cursor.execute("SELECT checksum FROM schema_version WHERE version = %s", (version,))
+                row = cursor.fetchone()
+                if row is not None:
+                    existing = row[0] if not isinstance(row, dict) else row["checksum"]
+                    if existing != checksum:
+                        raise StorageError("MariaDB migration checksum mismatch")
+                    continue
+                statements = tuple(
+                    statement.strip() for statement in migration.split(";") if statement.strip()
+                )
+                for statement in statements[1:] if version == 1 else statements:
                     cursor.execute(statement)
                 cursor.execute(
                     "INSERT INTO schema_version (version, checksum) VALUES (%s, %s)",
-                    (1, checksum),
+                    (version, checksum),
                 )
             self.connection.commit()
         except StorageError:
@@ -178,21 +216,32 @@ class MariaDbStore:
         cursor = self.connection.cursor()
         try:
             cursor.execute(
-                "INSERT INTO scan_run (run_id, started_at, completed_at, target_count, finding_count) VALUES (%s, %s, %s, %s, %s)",
+                "INSERT INTO scan_run (run_id, started_at, completed_at, target_count, finding_count, component_count) VALUES (%s, %s, %s, %s, %s, %s)",
                 (
                     run.run_id,
                     run.started_at,
                     run.completed_at,
                     len(run.targets),
                     sum(len(target.findings) for target in run.targets),
+                    sum(len(target.components) for target in run.targets),
                 ),
             )
             for target in run.targets:
+                exposure = target.exposure
                 cursor.execute(
-                    "INSERT INTO scan_target (run_id, url, status, complete_coverage, errors_json, started_at, completed_at) VALUES (%s, %s, %s, %s, %s, %s, %s)",
+                    "INSERT INTO scan_target (run_id, url, effective_url, reachability, http_status, redirect_count, body_length, vantage_point, inventory_complete, status, complete_coverage, errors_json, started_at, completed_at) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
                     (
                         run.run_id,
-                        target.target.url,
+                        exposure.configured_url
+                        if exposure is not None
+                        else (sanitize_inventory_url(target.target.url) or target.target.url),
+                        exposure.effective_url if exposure is not None else None,
+                        exposure.reachability.value if exposure is not None else None,
+                        exposure.http_status if exposure is not None else None,
+                        exposure.redirect_count if exposure is not None else 0,
+                        exposure.body_length if exposure is not None else None,
+                        exposure.vantage_point if exposure is not None else None,
+                        target.inventory_complete,
                         target.status.value,
                         target.complete,
                         json.dumps(target.errors),
@@ -218,6 +267,21 @@ class MariaDbStore:
                             finding.created_at,
                         ),
                     )
+                for component in target.components:
+                    cursor.execute(
+                        "INSERT INTO scan_component (scan_target_id, component_key, category, name, version, confidence, evidence_type, evidence, source_url) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
+                        (
+                            target_id,
+                            component.component_key,
+                            component.category.value,
+                            component.name,
+                            component.version,
+                            component.confidence,
+                            component.evidence_type,
+                            component.evidence,
+                            component.source_url,
+                        ),
+                    )
             self.connection.commit()
         except Exception as error:
             self.connection.rollback()
@@ -231,7 +295,7 @@ class MariaDbStore:
         cursor = self.connection.cursor()
         try:
             cursor.execute(
-                "SELECT run_id, started_at, completed_at, target_count, finding_count FROM scan_run ORDER BY started_at DESC LIMIT %s",
+                "SELECT run_id, started_at, completed_at, target_count, finding_count, component_count FROM scan_run ORDER BY started_at DESC LIMIT %s",
                 (limit,),
             )
             return tuple(StoredRunSummary(*row) for row in cursor.fetchall())

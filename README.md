@@ -29,8 +29,9 @@ uv run --locked secman-web-check scan https://example.com \
 
 Replace `https://example.com` with an authorized target. The final command performs a
 passive HTTP/TLS scan and writes terminal, JSON, SARIF, and self-contained HTML output.
-Machine reports are placed below `scan-output/` and contain findings only—never raw
-response bodies.
+The terminal, JSON, and HTML views include best-effort JavaScript/CSS library and web
+server fingerprints plus external reachability from the scanner's vantage point. Machine
+reports never contain raw response bodies.
 
 You can also activate the virtual environment and use the installed command directly:
 
@@ -111,7 +112,8 @@ It does not imply `--active`.
 
 ## Targets
 
-Supply exactly one positional target, one `--targets-file`, or one `--targets-csv`.
+Supply exactly one positional target, one `--targets-file`, one `--targets-csv`, or
+`--targets-from-secman`.
 Hostnames without a scheme use HTTPS. Plain target files are UTF-8, one URL or hostname
 per line; blank lines and lines beginning with `#` are ignored, and normalized
 duplicates are removed.
@@ -121,6 +123,7 @@ secman-web-check scan example.com
 secman-web-check scan https://example.com/application/health
 secman-web-check scan --targets-file examples/targets.txt
 secman-web-check scan --targets-csv testdata/targets-aws.csv
+secman-web-check scan --targets-from-secman --push-to-secman
 ```
 
 AWS target CSV files use this exact header and one account/target pair per row:
@@ -131,9 +134,25 @@ awsAccountNumber,target
 444455556666,service.example.org
 ```
 
-Account numbers must contain exactly 12 digits. The account number is retained in JSON
+Account numbers must contain 9 to 12 digits. The account number is retained in JSON
 reports and narrows SecMan subject matching before URI or hostname matching. A normalized
-target cannot be assigned to two different accounts in the same file.
+target cannot be assigned to two different accounts in the same file. A target cell may
+list several whitespace-separated targets; each is scanned under the same account number.
+
+A line that fails validation never stops a list scan by default: the line is skipped
+with a warning on stderr, and scanning continues with the remaining targets. This
+applies to plain target files and to individual CSV rows; a malformed CSV header, an
+unreadable file, or a list in which every line is invalid still aborts the scan. Pass
+`--strict` to abort on the first invalid line instead:
+
+```bash
+secman-web-check scan --targets-file examples/targets.txt --strict
+```
+
+`--targets-from-secman` loads the authorized subjects bound to the scanner ID selected
+by the current mode. Subjects without a URI are not guessed from their name. Loaded
+targets retain the exact subject and asset IDs, so a subsequent upload cannot bind the
+observation to a same-hostname asset by mistake.
 
 User information, URL fragments, non-HTTP schemes, and denied network addresses are
 rejected. Every DNS answer and redirect is revalidated. Approved connections pin the
@@ -142,8 +161,14 @@ verification.
 
 ## Reports and exit codes
 
+While a scan runs, progress goes to stderr: one phase line per scan pass (`Security
+scan` / `Visual scan`) followed by one line per finished target with its status,
+finding and error counts, and duration. Interactive terminals additionally show a live
+progress bar. Reports stay on stdout and in the output directory, so piping stdout
+remains clean.
+
 `--format` is repeatable and accepts `terminal`, `json`, `sarif`, `html`, or `all`.
-Terminal is the default. JSON uses schema version `1.0`; SARIF uses version `2.1.0`;
+Terminal is the default. JSON uses schema version `1.1`; SARIF uses version `2.1.0`;
 HTML is self-contained, script-free, escaped, and protected by a restrictive CSP.
 
 `--fail-on` accepts `info`, `low`, `medium`, `high`, `critical`, or `none` and defaults
@@ -208,7 +233,9 @@ uv run --locked secman-web-check scan https://example.com --scan-mode both \
 ```
 
 Uploads use `/api/integrations/v1`, never fall back to legacy ingestion, and submit each
-target as an atomic snapshot. Partial or failed coverage never resolves older findings.
+target as an atomic snapshot. Security snapshots may include exposure and component
+inventory; visual snapshots remain finding-only. Partial or failed coverage never
+resolves older findings or components.
 See [SecMan integration](docs/SECMAN.md).
 
 To resolve the SecMan credentials with Proton Pass, copy the reference-only example,

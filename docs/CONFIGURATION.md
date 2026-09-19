@@ -5,7 +5,7 @@ the `[scan]` table selected with `--config`, then built-in safe defaults.
 
 | TOML key | Environment variable | Default | Constraint |
 | --- | --- | ---: | --- |
-| `concurrency` | `SECMAN_WEB_CHECK_CONCURRENCY` | `4` | integer >= 1 |
+| `concurrency` | `SECMAN_WEB_CHECK_CONCURRENCY` | `20` | integer >= 1 |
 | `active` | `SECMAN_WEB_CHECK_ACTIVE` | `false` | boolean |
 | `allow_private_targets` | `SECMAN_WEB_CHECK_ALLOW_PRIVATE_TARGETS` | `false` | boolean |
 | `max_body_bytes` | `SECMAN_WEB_CHECK_MAX_BODY_BYTES` | `1048576` | integer >= 1 |

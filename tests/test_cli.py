@@ -1,21 +1,28 @@
+from dataclasses import replace
 from datetime import UTC, datetime
 
 from typer.testing import CliRunner
 
-from secman_web_check.cli import app
+from secman_web_check.cli import _push_to_secman, app
 from secman_web_check.models import ScanRun, TargetResult, TargetStatus
+from secman_web_check.secman import IntegrationSubject
+from secman_web_check.targets import normalize_target
 
 runner = CliRunner()
 
 
-def clean_run(targets, _config):
+def clean_run(targets, _config, progress=None):
     now = datetime.now(UTC)
+    results = tuple(
+        TargetResult(target, TargetStatus.SUCCESS, started_at=now, completed_at=now)
+        for target in targets
+    )
+    if progress is not None:
+        for completed, result in enumerate(results, 1):
+            progress(completed, len(results), result)
     return ScanRun(
         "00000000-0000-4000-8000-000000000002",
-        tuple(
-            TargetResult(target, TargetStatus.SUCCESS, started_at=now, completed_at=now)
-            for target in targets
-        ),
+        results,
         now,
         now,
     )
@@ -29,7 +36,9 @@ def test_help_documents_safety_and_integration_opt_ins():
         "--allow-private-targets",
         "--store-db",
         "--push-to-secman",
+        "--strict",
         "--targets-csv",
+        "--targets-from-secman",
     ):
         assert option in result.output
 
@@ -50,6 +59,77 @@ def test_scan_rejects_missing_or_conflicting_target_sources(tmp_path):
         ).exit_code
         == 2
     )
+    assert runner.invoke(app, ["scan", "example.com", "--targets-from-secman"]).exit_code == 2
+
+
+def test_scan_skips_invalid_target_file_lines_without_strict(monkeypatch, tmp_path):
+    targets_file = tmp_path / "targets.txt"
+    targets_file.write_text("example.com\nftp://unsupported.example\n")
+    scanned = []
+    monkeypatch.setattr(
+        "secman_web_check.cli.scan_all",
+        lambda targets, config, **kwargs: (
+            scanned.append(targets) or clean_run(targets, config, **kwargs)
+        ),
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "scan",
+            "--targets-file",
+            str(targets_file),
+            "--output-dir",
+            str(tmp_path),
+            "--fail-on",
+            "none",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert [target.host for target in scanned[0]] == ["example.com"]
+    assert "ftp://unsupported.example" in result.output
+    assert "Security scan: 1 target" in result.output
+    assert "[1/1] https://example.com/" in result.output
+
+
+def test_scan_strict_aborts_on_the_first_invalid_target_file_line(monkeypatch, tmp_path):
+    targets_file = tmp_path / "targets.txt"
+    targets_file.write_text("example.com\nftp://unsupported.example\n")
+    monkeypatch.setattr(
+        "secman_web_check.cli.scan_all",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("scan ran")),
+    )
+
+    result = runner.invoke(app, ["scan", "--targets-file", str(targets_file), "--strict"])
+
+    assert result.exit_code == 2
+
+
+def test_scan_can_load_targets_from_secman(monkeypatch, tmp_path):
+    loaded = []
+    normalized = normalize_target("https://example.com")
+    monkeypatch.setenv("SECMAN_SCANNER_ID", "42")
+    monkeypatch.setattr(
+        "secman_web_check.cli._targets_from_secman",
+        lambda scanner_id: loaded.append(scanner_id) or (normalized,),
+    )
+    monkeypatch.setattr("secman_web_check.cli.scan_all", clean_run)
+
+    result = runner.invoke(
+        app,
+        [
+            "scan",
+            "--targets-from-secman",
+            "--output-dir",
+            str(tmp_path),
+            "--fail-on",
+            "none",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert loaded == [42]
 
 
 def test_single_target_writes_all_reports_without_network(monkeypatch, tmp_path):
@@ -109,8 +189,8 @@ def test_visual_mode_is_selectable_without_running_security(monkeypatch, tmp_pat
     )
     monkeypatch.setattr(
         "secman_web_check.cli.scan_visual_all",
-        lambda targets, config, options: (
-            visual_calls.append((targets, config, options)) or clean_run(targets, config)
+        lambda targets, config, options, **kwargs: (
+            visual_calls.append((targets, config, options)) or clean_run(targets, config, **kwargs)
         ),
     )
 
@@ -138,7 +218,7 @@ def test_both_mode_uploads_separate_terminal_snapshots(monkeypatch, tmp_path):
     monkeypatch.setattr("secman_web_check.cli.scan_all", clean_run)
     monkeypatch.setattr(
         "secman_web_check.cli.scan_visual_all",
-        lambda targets, config, _options: clean_run(targets, config),
+        lambda targets, config, _options, **kwargs: clean_run(targets, config, **kwargs),
     )
     monkeypatch.setattr(
         "secman_web_check.cli._push_to_secman",
@@ -165,3 +245,33 @@ def test_both_mode_uploads_separate_terminal_snapshots(monkeypatch, tmp_path):
 
     assert result.exit_code == 0, result.output
     assert uploads == [(41, "security"), (42, "visual")]
+
+
+def test_secman_loaded_target_uses_same_asset_binding_for_other_scanner(monkeypatch):
+    target = replace(
+        normalize_target("https://example.com"),
+        secman_subject_id=4,
+        secman_asset_id=9,
+    )
+    run = clean_run((target,), None)
+    uploads = []
+
+    class Client:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def list_subjects(self, scanner_id):
+            assert scanner_id == 42
+            return [IntegrationSubject(40, 42, 9, "example.com", "https://example.com/")]
+
+        def submit_run(self, body):
+            uploads.append(body)
+
+    monkeypatch.setattr("secman_web_check.cli._integration_client", Client)
+
+    _push_to_secman(run, active=False, scanner_id=42, mode="visual")
+
+    assert uploads[0]["subjectId"] == 40

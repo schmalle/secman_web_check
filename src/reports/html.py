@@ -12,7 +12,7 @@ from .common import atomic_write
 def write_html(run: ScanRun, path: Path) -> Path:
     sections: list[str] = []
     for target in run.targets:
-        rows = "".join(
+        finding_rows = "".join(
             "<tr>"
             f"<td>{escape(finding.severity.value)}</td>"
             f"<td>{escape(finding.rule_id)}</td>"
@@ -22,13 +22,41 @@ def write_html(run: ScanRun, path: Path) -> Path:
             "</tr>"
             for finding in target.findings
         )
+        component_rows = "".join(
+            "<tr>"
+            f"<td>{escape(component.category.value)}</td>"
+            f"<td>{escape(component.name)}</td>"
+            f"<td>{escape(component.version or 'unknown')}</td>"
+            f"<td>{escape(component.evidence)}</td>"
+            "</tr>"
+            for component in target.components
+        )
         errors = "".join(f"<li>{escape(error)}</li>" for error in target.errors)
+        exposure = "Not observed"
+        if target.exposure is not None:
+            http_status = (
+                "-" if target.exposure.http_status is None else str(target.exposure.http_status)
+            )
+            body_length = (
+                "-"
+                if target.exposure.body_length is None
+                else f"{target.exposure.body_length} bytes"
+            )
+            exposure = (
+                f"{escape(target.exposure.reachability.value)}; HTTP {http_status}; "
+                f"{target.exposure.redirect_count} redirects; body {body_length}"
+            )
         sections.append(
             f"<section><h2>{escape(target.target.url)}</h2>"
             f"<p>Status: <strong>{escape(target.status.value)}</strong></p>"
+            f"<p>External exposure: <strong>{exposure}</strong></p>"
             f"<ul>{errors}</ul>"
+            "<h3>Software components</h3>"
+            "<table><thead><tr><th>Category</th><th>Component</th><th>Version</th>"
+            f"<th>Evidence</th></tr></thead><tbody>{component_rows}</tbody></table>"
+            "<h3>Security findings</h3>"
             "<table><thead><tr><th>Severity</th><th>Rule</th><th>Title</th>"
-            f"<th>Evidence</th><th>Recommendation</th></tr></thead><tbody>{rows}</tbody></table>"
+            f"<th>Evidence</th><th>Recommendation</th></tr></thead><tbody>{finding_rows}</tbody></table>"
             "</section>"
         )
     document = (

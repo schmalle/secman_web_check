@@ -24,6 +24,18 @@ class TargetStatus(StrEnum):
     FAILED = "FAILED"
 
 
+class ComponentCategory(StrEnum):
+    JAVASCRIPT_LIBRARY = "JAVASCRIPT_LIBRARY"
+    CSS_LIBRARY = "CSS_LIBRARY"
+    WEB_SERVER = "WEB_SERVER"
+
+
+class Reachability(StrEnum):
+    REACHABLE = "REACHABLE"
+    AUTHENTICATED = "AUTHENTICATED"
+    UNKNOWN = "UNKNOWN"
+
+
 def _utc(value: datetime) -> datetime:
     if value.tzinfo is None:
         return value.replace(tzinfo=UTC)
@@ -87,10 +99,62 @@ class Finding:
 
 
 @dataclass(frozen=True, slots=True)
+class DetectedComponent:
+    component_key: str
+    category: ComponentCategory
+    name: str
+    version: str | None
+    confidence: float
+    evidence_type: str
+    evidence: str
+    source_url: str | None = None
+
+    @classmethod
+    def create(
+        cls,
+        category: ComponentCategory,
+        name: str,
+        *,
+        version: str | None = None,
+        confidence: float,
+        evidence_type: str,
+        evidence: str,
+        source_url: str | None = None,
+    ) -> DetectedComponent:
+        identity = sha256(
+            f"{category.value}\N{UNIT SEPARATOR}{name.casefold()}\N{UNIT SEPARATOR}{version or ''}".encode()
+        ).hexdigest()
+        return cls(
+            component_key=f"{category.value.lower()}:{identity}",
+            category=category,
+            name=name,
+            version=version,
+            confidence=confidence,
+            evidence_type=evidence_type,
+            evidence=evidence,
+            source_url=source_url,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class ExposureObservation:
+    configured_url: str
+    effective_url: str | None
+    reachability: Reachability
+    http_status: int | None
+    redirect_count: int
+    vantage_point: str = "secman-web-check"
+    body_length: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class TargetResult:
     target: NormalizedTarget
     status: TargetStatus
     findings: tuple[Finding, ...] = ()
+    components: tuple[DetectedComponent, ...] = ()
+    exposure: ExposureObservation | None = None
+    inventory_complete: bool = False
     errors: tuple[str, ...] = ()
     complete: bool = True
     started_at: datetime = field(default_factory=_now)

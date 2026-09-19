@@ -8,10 +8,19 @@ from typing import Annotated, Any
 
 import typer
 from rich.console import Console
+from rich.markup import escape
+from rich.progress import (
+    BarColumn,
+    MofNCompleteColumn,
+    Progress,
+    SpinnerColumn,
+    TextColumn,
+    TimeElapsedColumn,
+)
 from rich.table import Table
 
 from .config import load_config
-from .models import ScanRun, Severity, TargetStatus
+from .models import ScanRun, Severity, TargetResult, TargetStatus
 from .orchestrator import scan_all
 from .reports import render_terminal, write_html, write_json, write_sarif
 from .secman import (
@@ -20,9 +29,10 @@ from .secman import (
     SecmanIntegrationError,
     build_run_body,
     match_subject,
+    targets_from_subjects,
 )
 from .storage import DatabaseSettings, MariaDbStore, StorageError, connect_database
-from .targets import TargetError, load_targets
+from .targets import NormalizedTarget, TargetError, load_targets
 from .visual import VisualOptions, merge_runs, scan_visual_all
 
 app = typer.Typer(
@@ -45,6 +55,44 @@ _SEVERITY = {
     Severity.HIGH: 3,
     Severity.CRITICAL: 4,
 }
+_STATUS_STYLES = {
+    TargetStatus.SUCCESS: "green",
+    TargetStatus.PARTIAL: "yellow",
+    TargetStatus.FAILED: "red",
+}
+
+
+class _ScanProgress:
+    """One scan phase on stderr: start line, live bar, and a line per finished target."""
+
+    def __init__(self, label: str, total: int, details: str) -> None:
+        noun = "target" if total == 1 else "targets"
+        error_console.print(f"[bold]{label}:[/bold] {total} {noun} ({details})")
+        self._progress = Progress(
+            SpinnerColumn(),
+            TextColumn("[bold]{task.description}"),
+            BarColumn(),
+            MofNCompleteColumn(),
+            TimeElapsedColumn(),
+            console=error_console,
+            transient=True,
+            disable=not error_console.is_interactive,
+        )
+        self._task = self._progress.add_task(label, total=total)
+        self._progress.start()
+
+    def __call__(self, completed: int, total: int, result: TargetResult) -> None:
+        duration = (result.completed_at - result.started_at).total_seconds()
+        style = _STATUS_STYLES.get(result.status, "white")
+        self._progress.console.print(
+            f"[dim]\\[{completed}/{total}][/dim] {escape(result.target.url)} — "
+            f"[{style}]{result.status.value}[/{style}] · "
+            f"{len(result.findings)} findings · {len(result.errors)} errors · {duration:.1f}s"
+        )
+        self._progress.update(self._task, completed=completed)
+
+    def close(self) -> None:
+        self._progress.stop()
 
 
 def _database() -> tuple[MariaDbStore, Any]:
@@ -70,35 +118,69 @@ def _write_reports(run: ScanRun, formats: tuple[str, ...], output_dir: Path) -> 
         console.print(f"HTML report: {path}")
 
 
-def _push_to_secman(run: ScanRun, *, active: bool, scanner_id: int, mode: str) -> None:
+def _integration_client() -> IntegrationClient:
     try:
         base_url = os.environ["SECMAN_URL"]
     except KeyError as error:
         raise SecmanIntegrationError("SecMan environment configuration is incomplete") from error
     token = os.environ.get("SECMAN_TOKEN")
     if token:
-        client = IntegrationClient(base_url, token)
-    else:
-        try:
-            client = IntegrationClient.login(
-                base_url,
-                os.environ["SECMAN_USERNAME"],
-                os.environ["SECMAN_PASSWORD"],
-            )
-        except KeyError as error:
-            raise SecmanIntegrationError("SecMan credentials are incomplete") from error
-    with client:
+        return IntegrationClient(base_url, token)
+    try:
+        return IntegrationClient.login(
+            base_url,
+            os.environ["SECMAN_USERNAME"],
+            os.environ["SECMAN_PASSWORD"],
+        )
+    except KeyError as error:
+        raise SecmanIntegrationError("SecMan credentials are incomplete") from error
+
+
+def _targets_from_secman(scanner_id: int) -> tuple[NormalizedTarget, ...]:
+    with _integration_client() as client:
+        return targets_from_subjects(client.list_subjects(scanner_id))
+
+
+def _push_to_secman(run: ScanRun, *, active: bool, scanner_id: int, mode: str) -> None:
+    with _integration_client() as client:
         subjects = client.list_subjects(scanner_id)
+        subjects_by_id = {subject.id: subject for subject in subjects}
         failed_hosts: list[str] = []
         for result in run.targets:
             try:
-                subject = match_subject(
-                    subjects,
-                    result.target.url,
-                    aws_account_number=result.target.aws_account_number,
-                )
+                subject = None
+                if result.target.secman_subject_id is not None:
+                    candidate = subjects_by_id.get(result.target.secman_subject_id)
+                    if (
+                        candidate is not None
+                        and candidate.asset_id == result.target.secman_asset_id
+                    ):
+                        subject = candidate
+                    elif result.target.secman_asset_id is not None:
+                        asset_matches = [
+                            item
+                            for item in subjects
+                            if item.asset_id == result.target.secman_asset_id
+                        ]
+                        if len(asset_matches) == 1:
+                            subject = asset_matches[0]
+                        elif len(asset_matches) > 1:
+                            raise SecmanIntegrationError(
+                                "multiple SecMan subjects match the bound asset"
+                            )
+                else:
+                    subject = match_subject(
+                        subjects,
+                        result.target.url,
+                        aws_account_number=result.target.aws_account_number,
+                    )
                 if subject is None:
-                    raise SecmanIntegrationError("no authorized subject matched")
+                    message = (
+                        "SecMan target binding changed during the scan"
+                        if result.target.secman_subject_id is not None
+                        else "no authorized subject matched"
+                    )
+                    raise SecmanIntegrationError(message)
                 body = build_run_body(
                     scanner_id,
                     subject,
@@ -151,9 +233,23 @@ def scan(
             help="CSV file with the exact header awsAccountNumber,target.",
         ),
     ] = None,
+    targets_from_secman: Annotated[
+        bool,
+        typer.Option(
+            "--targets-from-secman",
+            help="Use the authorized subjects bound to this scan mode's SecMan scanner.",
+        ),
+    ] = False,
+    strict: Annotated[
+        bool,
+        typer.Option(
+            "--strict",
+            help="Abort on the first invalid target line instead of skipping it.",
+        ),
+    ] = False,
     config: Annotated[
         Path | None,
-        typer.Option("--config", help="TOML file containing a [scan] table."),
+        typer.Option("--config", help="TOML file containing a \\[scan] table."),
     ] = None,
     formats: Annotated[
         list[str] | None,
@@ -217,8 +313,20 @@ def scan(
     ] = "high",
 ) -> None:
     """Scan one target or a target file and produce normalized reports."""
-    if sum(source is not None for source in (target, targets_file, targets_csv)) != 1:
-        raise typer.BadParameter("provide exactly one target, --targets-file, or --targets-csv")
+    if (
+        sum(
+            (
+                target is not None,
+                targets_file is not None,
+                targets_csv is not None,
+                targets_from_secman,
+            )
+        )
+        != 1
+    ):
+        raise typer.BadParameter(
+            "provide exactly one target, --targets-file, --targets-csv, or --targets-from-secman"
+        )
     scan_mode = scan_mode.lower()
     if scan_mode not in {"security", "visual", "both"}:
         raise typer.BadParameter("--scan-mode must be security, visual, or both")
@@ -239,8 +347,18 @@ def scan(
             active=True if active else None,
             allow_private_targets=True if allow_private_targets else None,
         )
-        targets = load_targets(target, targets_file, targets_csv)
-    except (OSError, TypeError, ValueError, TargetError) as error:
+        if targets_from_secman:
+            source_mode = "visual" if scan_mode == "visual" else "security"
+            error_console.print("[dim]Fetching authorized subjects from SecMan…[/dim]")
+            targets = _targets_from_secman(_scanner_id(source_mode, combined=scan_mode == "both"))
+        else:
+            loaded_targets = load_targets(target, targets_file, targets_csv, strict=strict)
+            targets = loaded_targets.targets
+            for skipped in loaded_targets.skipped:
+                error_console.print(
+                    f"[yellow]Skipped invalid target[/yellow] {skipped.value!r}: {skipped.reason}"
+                )
+    except (OSError, TypeError, ValueError, TargetError, SecmanIntegrationError) as error:
         raise typer.BadParameter(str(error)) from error
     if not targets:
         raise typer.BadParameter("no usable targets were supplied")
@@ -258,14 +376,35 @@ def scan(
         except ValueError as error:
             raise typer.BadParameter(str(error)) from error
 
-    security_run = scan_all(targets, scan_config) if scan_mode in {"security", "both"} else None
-    visual_run = None
-    if visual_options is not None:
+    security_run: ScanRun | None = None
+    if scan_mode in {"security", "both"}:
+        security_progress = _ScanProgress(
+            "Security scan",
+            len(targets),
+            f"concurrency {scan_config.concurrency}, "
+            f"{'active' if scan_config.active else 'passive'} mode",
+        )
         try:
-            visual_run = scan_visual_all(targets, scan_config, visual_options)
+            security_run = scan_all(targets, scan_config, progress=security_progress)
+        finally:
+            security_progress.close()
+    visual_run: ScanRun | None = None
+    if visual_options is not None:
+        visual_progress = _ScanProgress(
+            "Visual scan",
+            len(targets),
+            f"concurrency {scan_config.concurrency}, "
+            f"vision analysis {'on' if visual_options.analyze else 'off'}",
+        )
+        try:
+            visual_run = scan_visual_all(
+                targets, scan_config, visual_options, progress=visual_progress
+            )
         except (OSError, RuntimeError, ValueError) as error:
             error_console.print(f"[red]Operational error:[/red] {error}")
             raise typer.Exit(2) from error
+        finally:
+            visual_progress.close()
     run: ScanRun | None
     if security_run is not None and visual_run is not None:
         run = merge_runs(security_run, visual_run)
@@ -279,6 +418,7 @@ def scan(
     try:
         _write_reports(run, requested, output_dir)
         if store_db:
+            error_console.print("[dim]Storing run in MariaDB…[/dim]")
             store, connection = _database()
             try:
                 store.save(run)
@@ -287,6 +427,10 @@ def scan(
         if push_to_secman:
             combined = scan_mode == "both"
             if security_run is not None:
+                error_console.print(
+                    f"[dim]Pushing {len(security_run.targets)} security "
+                    "snapshot(s) to SecMan…[/dim]"
+                )
                 _push_to_secman(
                     security_run,
                     active=scan_config.active,
@@ -294,6 +438,9 @@ def scan(
                     mode="security",
                 )
             if visual_run is not None:
+                error_console.print(
+                    f"[dim]Pushing {len(visual_run.targets)} visual snapshot(s) to SecMan…[/dim]"
+                )
                 _push_to_secman(
                     visual_run,
                     active=False,
@@ -362,10 +509,14 @@ def history_list(
     except StorageError as error:
         error_console.print(f"[red]{error}[/red]")
         raise typer.Exit(2) from error
-    table = Table("Run", "Started", "Targets", "Findings")
+    table = Table("Run", "Started", "Targets", "Findings", "Components")
     for run in runs:
         table.add_row(
-            run.run_id, run.started_at.isoformat(), str(run.target_count), str(run.finding_count)
+            run.run_id,
+            run.started_at.isoformat(),
+            str(run.target_count),
+            str(run.finding_count),
+            str(run.component_count),
         )
     console.print(table)
 

@@ -4,7 +4,16 @@ from datetime import UTC, datetime
 import httpx
 import pytest
 
-from secman_web_check.models import Finding, Severity, TargetResult, TargetStatus
+from secman_web_check.models import (
+    ComponentCategory,
+    DetectedComponent,
+    ExposureObservation,
+    Finding,
+    Reachability,
+    Severity,
+    TargetResult,
+    TargetStatus,
+)
 from secman_web_check.secman import (
     AmbiguousSubject,
     IntegrationClient,
@@ -12,6 +21,7 @@ from secman_web_check.secman import (
     SecmanIntegrationError,
     build_run_body,
     match_subject,
+    targets_from_subjects,
     validate_base_url,
 )
 from secman_web_check.targets import normalize_target
@@ -49,6 +59,52 @@ def test_build_run_body_uses_the_shared_v1_contract() -> None:
     assert body["findings"][0]["externalId"].startswith("WEB-HSTS-001:")
     assert body["findings"][0]["severity"] == "HIGH"
     assert body["runKey"].startswith("secman-web-check-v1:")
+
+
+def test_build_run_body_includes_sanitized_inventory_snapshot() -> None:
+    subject = IntegrationSubject(2, 1, 3, "example.com", "https://example.com/")
+    component = DetectedComponent.create(
+        ComponentCategory.JAVASCRIPT_LIBRARY,
+        "jQuery",
+        version="3.7.1",
+        confidence=0.95,
+        evidence_type="RESOURCE_URL",
+        evidence="Matched jQuery resource URL",
+        source_url="https://cdn.example/jquery-3.7.1.min.js",
+    )
+    result = replace(
+        _result(),
+        components=(component,),
+        exposure=ExposureObservation(
+            "https://example.com/",
+            "https://example.com/login",
+            Reachability.REACHABLE,
+            200,
+            1,
+            body_length=2048,
+        ),
+        inventory_complete=True,
+    )
+
+    inventory = build_run_body(1, subject, result)["inventory"]
+
+    assert inventory["completeCoverage"] is True
+    assert inventory["exposure"]["reachability"] == "REACHABLE"
+    assert inventory["exposure"]["bodyLength"] == 2048
+    assert inventory["components"][0]["name"] == "jQuery"
+
+
+def test_secman_subjects_are_directly_bound_to_loaded_targets() -> None:
+    subjects = [
+        IntegrationSubject(4, 1, 9, "example.com", "https://example.com/app"),
+        IntegrationSubject(5, 1, 10, "missing-uri", None),
+    ]
+
+    targets = targets_from_subjects(subjects)
+
+    assert len(targets) == 1
+    assert targets[0].secman_subject_id == 4
+    assert targets[0].secman_asset_id == 9
 
 
 def test_run_key_is_deterministic_and_complete_coverage_tracks_the_result() -> None:

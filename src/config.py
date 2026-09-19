@@ -12,7 +12,7 @@ _PREFIX = "SECMAN_WEB_CHECK_"
 
 @dataclass(frozen=True, slots=True)
 class ScannerConfig:
-    concurrency: int = 4
+    concurrency: int = 20
     active: bool = False
     allow_private_targets: bool = False
     max_body_bytes: int = 1_048_576
@@ -86,7 +86,7 @@ def load_config(
             values[name] = environ[environment_name]
     values.update({name: value for name, value in overrides.items() if value is not None})
     return ScannerConfig(
-        concurrency=int(_coerce("concurrency", values.get("concurrency", 4))),
+        concurrency=int(_coerce("concurrency", values.get("concurrency", 20))),
         active=bool(_coerce("active", values.get("active", False))),
         allow_private_targets=bool(
             _coerce("allow_private_targets", values.get("allow_private_targets", False))

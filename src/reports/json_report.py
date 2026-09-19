@@ -7,7 +7,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from ..models import Finding, ScanRun, TargetResult
+from ..models import DetectedComponent, ExposureObservation, Finding, ScanRun, TargetResult
 from .common import atomic_write
 
 
@@ -32,12 +32,42 @@ def _finding_document(finding: Finding) -> dict[str, Any]:
     }
 
 
+def _component_document(component: DetectedComponent) -> dict[str, Any]:
+    return {
+        "componentKey": component.component_key,
+        "category": component.category.value,
+        "name": component.name,
+        "version": component.version,
+        "confidence": component.confidence,
+        "evidenceType": component.evidence_type,
+        "evidence": component.evidence,
+        "sourceUrl": component.source_url,
+    }
+
+
+def _exposure_document(exposure: ExposureObservation | None) -> dict[str, Any] | None:
+    if exposure is None:
+        return None
+    return {
+        "configuredUrl": exposure.configured_url,
+        "effectiveUrl": exposure.effective_url,
+        "reachability": exposure.reachability.value,
+        "httpStatus": exposure.http_status,
+        "redirectCount": exposure.redirect_count,
+        "bodyLength": exposure.body_length,
+        "vantagePoint": exposure.vantage_point,
+    }
+
+
 def _target_document(target: TargetResult) -> dict[str, Any]:
     return {
         "url": target.target.url,
         "awsAccountNumber": target.target.aws_account_number,
         "status": target.status.value,
         "complete": target.complete,
+        "inventoryComplete": target.inventory_complete,
+        "exposure": _exposure_document(target.exposure),
+        "components": [_component_document(component) for component in target.components],
         "errors": list(target.errors),
         "startedAt": _timestamp(target.started_at),
         "completedAt": _timestamp(target.completed_at),
@@ -47,7 +77,7 @@ def _target_document(target: TargetResult) -> dict[str, Any]:
 
 def run_document(run: ScanRun) -> dict[str, Any]:
     return {
-        "schemaVersion": "1.0",
+        "schemaVersion": "1.1",
         "runId": run.run_id,
         "startedAt": _timestamp(run.started_at),
         "completedAt": _timestamp(run.completed_at),
