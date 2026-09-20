@@ -20,6 +20,7 @@ from rich.progress import (
 from rich.table import Table
 
 from .config import load_config
+from .external_scanners import SUPPORTED_SCANNERS
 from .models import ScanRun, Severity, TargetResult, TargetStatus
 from .orchestrator import scan_all
 from .reports import render_terminal, write_html, write_json, write_sarif
@@ -267,6 +268,20 @@ def scan(
         bool,
         typer.Option("--active", help="Enable the fixed allowlist of bounded active probes."),
     ] = False,
+    dirbuster: Annotated[
+        bool,
+        typer.Option(
+            "--dirbuster",
+            help="Explicitly enable bounded, non-recursive path discovery on HTTP 200 targets.",
+        ),
+    ] = False,
+    external_scanner: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--external-scanner",
+            help="Explicitly run a safe profile: nuclei or nikto (repeatable).",
+        ),
+    ] = None,
     scan_mode: Annotated[
         str,
         typer.Option(
@@ -330,6 +345,14 @@ def scan(
     scan_mode = scan_mode.lower()
     if scan_mode not in {"security", "visual", "both"}:
         raise typer.BadParameter("--scan-mode must be security, visual, or both")
+    selected_scanners = tuple(name.lower() for name in (external_scanner or ()))
+    unknown_scanners = set(selected_scanners) - SUPPORTED_SCANNERS
+    if unknown_scanners:
+        raise typer.BadParameter(
+            f"--external-scanner must be nuclei or nikto, not {min(unknown_scanners)}"
+        )
+    if (dirbuster or selected_scanners) and scan_mode == "visual":
+        raise typer.BadParameter("active discovery and external scanners require a security scan")
     requested = tuple(formats or ("terminal",))
     if "all" in requested:
         requested = ("terminal", "json", "sarif", "html")
@@ -385,7 +408,16 @@ def scan(
             f"{'active' if scan_config.active else 'passive'} mode",
         )
         try:
-            security_run = scan_all(targets, scan_config, progress=security_progress)
+            if dirbuster or selected_scanners:
+                security_run = scan_all(
+                    targets,
+                    scan_config,
+                    progress=security_progress,
+                    dirbuster=dirbuster,
+                    external_scanners=selected_scanners,
+                )
+            else:
+                security_run = scan_all(targets, scan_config, progress=security_progress)
         finally:
             security_progress.close()
     visual_run: ScanRun | None = None

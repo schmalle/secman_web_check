@@ -39,8 +39,17 @@ def test_help_documents_safety_and_integration_opt_ins():
         "--strict",
         "--targets-csv",
         "--targets-from-secman",
+        "--dirbuster",
+        "--external-scanner",
     ):
         assert option in result.output
+
+
+def test_external_scanner_is_explicit_and_validated():
+    result = runner.invoke(app, ["scan", "example.com", "--external-scanner", "unknown"])
+
+    assert result.exit_code == 2
+    assert "must be nuclei or nikto" in result.output
 
 
 def test_scan_rejects_missing_or_conflicting_target_sources(tmp_path):

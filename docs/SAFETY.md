@@ -63,3 +63,17 @@ The tool does not crawl, enumerate ports, discover hosts, authenticate, replay c
 brute-force, exploit, upload payloads, or fuzz arbitrary inputs. Visual mode executes
 only the explicitly selected pages and their policy-approved resources.
 Do not modify it to bypass target policy or TLS verification for operational scans.
+
+## Optional extended checks
+
+Content discovery and external scanner adapters are separate explicit opt-ins. Content
+discovery is bounded to at most 100 validated relative paths and is neither recursive nor
+fuzzed. Nuclei is limited to technology, misconfiguration, and exposure templates with
+DoS/fuzz/intrusive tags excluded. Nikto uses the non-destructive tuning classes. Both
+adapters use one worker, a low request rate or bounded runtime, no interactive features,
+and ephemeral output.
+
+Immediately before each external process, DNS is revalidated against the normal address
+policy. The process receives an approved IP literal as its network target and receives
+the original hostname only as HTTP Host / virtual-host and TLS SNI metadata. Private
+targets still require `--allow-private-targets`.
