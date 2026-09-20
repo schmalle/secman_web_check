@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import threading
 import warnings
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -45,6 +46,10 @@ _COMMANDS = {
     ScanCommand.SESSION_RENEGOTIATION,
 }
 
+# Bound process-wide TLS scan parallelism: each SSLyze scan opens many sockets,
+# and unbounded bursts make servers drop or throttle connections mid-scan.
+_SCAN_GATE = threading.Semaphore(3)
+
 
 def _finding(rule_id: str, target: NormalizedTarget, evidence: str) -> Finding:
     rule = RULES[rule_id]
@@ -58,6 +63,20 @@ def _finding(rule_id: str, target: NormalizedTarget, evidence: str) -> Finding:
         recommendation=rule.recommendation,
         evidence=evidence,
     )
+
+
+def _trace_summary(trace: Any) -> str | None:
+    if trace is None:
+        return None
+    summary = "".join(trace.format_exception_only()).strip()
+    return summary or None
+
+
+def _connectivity_error(result: Any) -> str:
+    detail = _trace_summary(result.connectivity_error_trace)
+    if detail is None:
+        return "TLS connectivity failed"
+    return f"TLS connectivity failed: {detail}"
 
 
 class TlsScanner:
@@ -79,9 +98,9 @@ class TlsScanner:
             tls_server_name_indication=target.host,
             http_user_agent="secman-web-check/0.1",
             network_timeout=max(1, math.ceil(self.config.connect_timeout_seconds)),
-            network_max_retries=0,
+            network_max_retries=3,
         )
-        with warnings.catch_warnings():
+        with _SCAN_GATE, warnings.catch_warnings():
             warnings.filterwarnings(
                 "ignore",
                 message="Parsed a serial number which wasn't positive.*",
@@ -99,7 +118,7 @@ class TlsScanner:
             )
             result = next(scanner.get_results())
         if result.scan_result is None:
-            return TlsEvidence(False, ("TLS connectivity failed",)), ()
+            return TlsEvidence(False, (_connectivity_error(result),)), ()
         return self._translate(target, result.scan_result)
 
     def _translate(
@@ -117,7 +136,15 @@ class TlsScanner:
                 attempt.status is not ScanCommandAttemptStatusEnum.COMPLETED
                 or attempt.result is None
             ):
-                errors.append(f"TLS capability {name} was incomplete")
+                reason = getattr(attempt, "error_reason", None)
+                detail = (
+                    _trace_summary(getattr(attempt, "error_trace", None))
+                    or (reason.name.lower().replace("_", " ") if reason is not None else None)
+                )
+                message = f"TLS capability {name} was incomplete"
+                if detail:
+                    message = f"{message}: {detail}"
+                errors.append(message)
                 results[name] = None
                 return None
             results[name] = attempt.result
