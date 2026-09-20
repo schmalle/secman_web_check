@@ -85,3 +85,18 @@ weaknesses. HIGH identifies likely serious exposure or deprecated controls. CRIT
 reserved for obsolete protocol support or a known TLS vulnerability probe reporting a
 vulnerable endpoint. Lower-confidence heuristic findings are explicitly marked in the
 machine reports and require contextual validation.
+
+## Component vulnerability matching
+
+Detected, exact component versions are compared offline with a small reviewed advisory
+catalogue. Matches become normal findings (including CVE, affected version evidence,
+and remediation), so terminal/JSON/SARIF/HTML, MariaDB, and SecMan output all use the
+same record. Unknown versions do not produce vulnerability claims.
+
+## Explicit discovery and external scanners
+
+`--dirbuster` enables a fixed, non-recursive path allowlist only after an HTTP 200 root
+response. `--external-scanner nuclei` and `--external-scanner nikto` invoke optional
+locally installed tools with non-destructive profiles. Both are disabled by default and
+run only on HTTP 200 targets. External output is normalized into the same finding model;
+temporary native output is removed after parsing.

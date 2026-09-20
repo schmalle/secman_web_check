@@ -175,6 +175,9 @@ class BrowserCapturer:
                     return PageCapture(target.url, final_url, None, "", "", None, "address denied")
                 if not self.policy.allows(connected_address):
                     return PageCapture(target.url, final_url, None, "", "", None, "address denied")
+            status_code = None if response is None else response.status
+            if status_code != 200:
+                return PageCapture(target.url, final_url, None, "", "", status_code)
             title = (await page.title())[:300]
             text = re.sub(r"\s+", " ", await page.locator("body").inner_text())[:4000]
             path = self.options.output_dir / _safe_name(target, index)
@@ -200,7 +203,7 @@ class BrowserCapturer:
                 path,
                 title,
                 text,
-                None if response is None else response.status,
+                status_code,
             )
         except Exception as error:  # noqa: BLE001 - isolate one browser target
             return PageCapture(target.url, page.url, None, "", "", None, _safe_error(error))
@@ -321,7 +324,7 @@ async def _scan_visual_async(
             findings: list[Finding] = []
             if capture.error:
                 errors.append(capture.error)
-            elif options.analyze:
+            elif capture.status_code == 200 and options.analyze:
                 try:
                     findings = await _analyze(capture, options)
                 except (httpx.HTTPError, OSError, TypeError, ValueError):

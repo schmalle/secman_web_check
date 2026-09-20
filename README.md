@@ -30,7 +30,9 @@ uv run --locked secman-web-check scan https://example.com \
 Replace `https://example.com` with an authorized target. The final command performs a
 passive HTTP/TLS scan and writes terminal, JSON, SARIF, and self-contained HTML output.
 The terminal, JSON, and HTML views include best-effort JavaScript/CSS library and web
-server fingerprints plus external reachability from the scanner's vantage point. Machine
+server fingerprints, locally matched vulnerable-version advisories, and external
+reachability from the scanner's vantage point. These records can be printed, stored in
+the optional local MariaDB, or sent through the optional SecMan integration. Machine
 reports never contain raw response bodies.
 
 You can also activate the virtual environment and use the installed command directly:
@@ -60,7 +62,8 @@ uv run --locked secman-web-check scan https://example.com \
 `--visual-no-ai` performs deterministic screenshot capture without a model call, so it
 cannot report visual-content findings. Screenshots are written below
 `OUTPUT_DIR/screenshots` unless `--visual-output-dir` is supplied. Full-page captures
-are capped at 4000 pixels.
+are capped at 4000 pixels. Only final HTTP 200 responses are captured or sent to the
+OpenRouter-compatible vision endpoint; credentials are read only from the environment.
 
 Scan one public target using safe defaults:
 
@@ -98,6 +101,25 @@ uv run --locked secman-web-check scan https://example.com --active
 The `--active` flag enables fixed `TRACE`, `OPTIONS`, `.env`, `.git/HEAD`,
 `server-status`, and configuration-backup requests. It does not enable crawling,
 arbitrary paths, authentication, exploitation, brute force, or fuzzing.
+
+Additional bounded directory discovery is a separate explicit opt-in. It requests a
+small built-in list only when the main response is HTTP 200; it is non-recursive and
+does not mutate the target:
+
+```bash
+uv run --locked secman-web-check scan https://example.com --dirbuster
+```
+
+Two external open-source scanners can also be selected individually or together. Their
+adapters use safe profiles, disable interaction/update behavior, rate-limit requests,
+revalidate DNS immediately before launch, and give the process only an approved IP
+literal while retaining the HTTP virtual host and TLS SNI. The binaries are optional and
+must already be installed. These scans are never implied by `--active`:
+
+```bash
+uv run --locked secman-web-check scan https://example.com \
+  --external-scanner nuclei --external-scanner nikto --fail-on none
+```
 
 Scan an authorized private target:
 

@@ -10,11 +10,18 @@ from uuid import uuid4
 from .checks import PASSIVE_CHECKS, CheckContext
 from .checks.active import run_active_checks
 from .checks.redirects import check_redirects
-from .components import detect_components, inventory_response_is_complete, sanitize_inventory_url
+from .components import (
+    detect_components,
+    find_component_vulnerabilities,
+    inventory_response_is_complete,
+    sanitize_inventory_url,
+)
 from .config import ScannerConfig
+from .discovery import discover_paths
+from .external_scanners import scan_with_external
 from .http import CollectionError, HttpCollector
 from .models import ExposureObservation, Reachability, ScanRun, TargetResult, TargetStatus
-from .targets import AddressDenied, NormalizedTarget, normalize_target
+from .targets import AddressDenied, AddressPolicy, NormalizedTarget, normalize_target
 from .tls import TlsScanner
 
 ProgressCallback = Callable[[int, int, TargetResult], None]
@@ -37,6 +44,8 @@ def scan_target(
     *,
     collector: HttpCollector | None = None,
     tls_scanner: TlsScanner | None = None,
+    dirbuster: bool = False,
+    external_scanners: tuple[str, ...] = (),
 ) -> TargetResult:
     """Scan one explicit target; errors are sanitized and retained on its result."""
     started = datetime.now(UTC)
@@ -83,6 +92,20 @@ def scan_target(
     findings.extend(active_result.findings)
     errors.extend(active_result.errors)
 
+    # Additional requests are strictly opt-in and only run after a successful root response.
+    if response.status_code == 200 and dirbuster:
+        discovery = discover_paths(effective_target, http)
+        findings.extend(discovery.findings)
+        errors.extend(discovery.errors)
+    if response.status_code == 200 and external_scanners:
+        external = scan_with_external(
+            effective_target,
+            external_scanners,
+            policy=AddressPolicy.from_config(config),
+        )
+        findings.extend(external.findings)
+        errors.extend(external.errors)
+
     try:
         tls_evidence, tls_findings = tls.scan(effective_target)
         findings.extend(tls_findings)
@@ -90,6 +113,8 @@ def scan_target(
     except (AddressDenied, OSError, RuntimeError, StopIteration, ValueError):
         errors.append("TLS analysis failed")
 
+    components = detect_components(response)
+    findings.extend(find_component_vulnerabilities(components, target.url))
     unique = {finding.external_id: finding for finding in findings}
     complete = not errors
     reachability = (
@@ -101,7 +126,7 @@ def scan_target(
         target=target,
         status=TargetStatus.SUCCESS if complete else TargetStatus.PARTIAL,
         findings=tuple(unique.values()),
-        components=detect_components(response),
+        components=components,
         exposure=ExposureObservation(
             configured_url=sanitize_inventory_url(target.url) or target.url,
             effective_url=sanitize_inventory_url(response.url),
@@ -123,16 +148,27 @@ def scan_all(
     config: ScannerConfig,
     *,
     progress: ProgressCallback | None = None,
+    dirbuster: bool = False,
+    external_scanners: tuple[str, ...] = (),
 ) -> ScanRun:
     """Scan a bounded target list concurrently without cancelling sibling targets."""
     started = datetime.now(UTC)
     completed = 0
     results: list[TargetResult | None] = [None] * len(targets)
     with ThreadPoolExecutor(max_workers=config.concurrency) as executor:
-        future_indexes = {
-            executor.submit(scan_target, target, config): index
-            for index, target in enumerate(targets)
-        }
+        future_indexes = {}
+        for index, target in enumerate(targets):
+            if dirbuster or external_scanners:
+                future = executor.submit(
+                    scan_target,
+                    target,
+                    config,
+                    dirbuster=dirbuster,
+                    external_scanners=external_scanners,
+                )
+            else:
+                future = executor.submit(scan_target, target, config)
+            future_indexes[future] = index
         for future in as_completed(future_indexes):
             index = future_indexes[future]
             try:

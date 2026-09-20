@@ -1,5 +1,6 @@
 from secman_web_check.components import (
     detect_components,
+    find_component_vulnerabilities,
     inventory_response_is_complete,
     sanitize_inventory_url,
 )
@@ -66,3 +67,31 @@ def test_only_complete_successful_html_can_resolve_absent_components():
         inventory_response_is_complete(_response(b"{}", (("Content-Type", "application/json"),)))
         is False
     )
+
+
+def test_known_component_version_creates_local_advisory_finding():
+    components = detect_components(
+        _response(
+            b'<script src="/jquery-3.4.1.min.js"></script>',
+            (("Content-Type", "text/html"),),
+        )
+    )
+
+    findings = find_component_vulnerabilities(components, "https://app.example/")
+
+    assert {finding.rule_id for finding in findings} == {
+        "WEB-COMPONENT-CVE-2020-11022",
+        "WEB-COMPONENT-CVE-2020-11023",
+    }
+    assert all(finding.engine == "secman-web-check-components" for finding in findings)
+
+
+def test_fixed_or_unknown_component_versions_do_not_claim_vulnerability():
+    components = detect_components(
+        _response(
+            b'<script src="/jquery-3.7.1.min.js"></script><script src="/react.min.js"></script>',
+            (("Content-Type", "text/html"),),
+        )
+    )
+
+    assert find_component_vulnerabilities(components, "https://app.example/") == ()
