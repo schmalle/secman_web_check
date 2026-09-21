@@ -137,9 +137,8 @@ class TlsScanner:
                 or attempt.result is None
             ):
                 reason = getattr(attempt, "error_reason", None)
-                detail = (
-                    _trace_summary(getattr(attempt, "error_trace", None))
-                    or (reason.name.lower().replace("_", " ") if reason is not None else None)
+                detail = _trace_summary(getattr(attempt, "error_trace", None)) or (
+                    reason.name.lower().replace("_", " ") if reason is not None else None
                 )
                 message = f"TLS capability {name} was incomplete"
                 if detail:
