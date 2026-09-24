@@ -41,6 +41,9 @@ def test_help_documents_safety_and_integration_opt_ins():
         "--targets-from-secman",
         "--dirbuster",
         "--external-scanner",
+        "--javascript-inventory",
+        "--llm-review",
+        "--llm-prompt",
     ):
         assert option in result.output
 
@@ -50,6 +53,49 @@ def test_external_scanner_is_explicit_and_validated():
 
     assert result.exit_code == 2
     assert "must be nuclei or nikto" in result.output
+
+
+def test_javascript_inventory_is_forwarded_as_explicit_opt_in(monkeypatch, tmp_path):
+    calls = []
+
+    def scan_with_options(targets, config, **kwargs):
+        calls.append(kwargs)
+        return clean_run(targets, config, progress=kwargs.get("progress"))
+
+    monkeypatch.setattr("secman_web_check.cli.scan_all", scan_with_options)
+    result = runner.invoke(
+        app,
+        [
+            "scan",
+            "example.com",
+            "--javascript-inventory",
+            "--output-dir",
+            str(tmp_path),
+            "--fail-on",
+            "none",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert calls[0]["javascript"] is True
+
+
+def test_llm_review_requires_key_before_scanning(monkeypatch, tmp_path):
+    prompt = tmp_path / "prompt.txt"
+    prompt.write_text("custom review prompt", encoding="utf-8")
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.setattr(
+        "secman_web_check.cli.scan_all",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("scan ran")),
+    )
+
+    result = runner.invoke(
+        app,
+        ["scan", "example.com", "--llm-review", "--llm-prompt", str(prompt)],
+    )
+
+    assert result.exit_code == 2
+    assert "OPENROUTER_API_KEY" in result.output
 
 
 def test_scan_rejects_missing_or_conflicting_target_sources(tmp_path):

@@ -59,7 +59,7 @@ def _load_secret(secret_id: str, region: str | None) -> dict[str, str]:
     except json.JSONDecodeError as error:
         raise RuntimeError("AWS secret must contain one JSON object") from error
     if not isinstance(document, dict):
-        raise RuntimeError("AWS secret must contain one JSON object")
+        raise TypeError("AWS secret must contain one JSON object")
     unknown = set(document) - ALLOWED_KEYS
     if unknown:
         raise RuntimeError(f"AWS secret contains unsupported key: {min(unknown)}")

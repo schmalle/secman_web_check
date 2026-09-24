@@ -38,6 +38,9 @@ packages = [
 ]
 package-dir = { secman_web_check = "src" }
 
+[tool.setuptools.package-data]
+secman_web_check = ["prompts/*.txt"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 

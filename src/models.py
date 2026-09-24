@@ -148,11 +148,23 @@ class ExposureObservation:
 
 
 @dataclass(frozen=True, slots=True)
+class JavaScriptAsset:
+    """Metadata retained for a fetched script; response bytes are never persisted."""
+
+    url: str
+    sha256: str
+    size_bytes: int
+    status_code: int
+    truncated: bool = False
+
+
+@dataclass(frozen=True, slots=True)
 class TargetResult:
     target: NormalizedTarget
     status: TargetStatus
     findings: tuple[Finding, ...] = ()
     components: tuple[DetectedComponent, ...] = ()
+    javascript_assets: tuple[JavaScriptAsset, ...] = ()
     exposure: ExposureObservation | None = None
     inventory_complete: bool = False
     errors: tuple[str, ...] = ()
