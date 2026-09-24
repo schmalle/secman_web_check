@@ -35,6 +35,35 @@ reachability from the scanner's vantage point. These records can be printed, sto
 the optional local MariaDB, or sent through the optional SecMan integration. Machine
 reports never contain raw response bodies.
 
+Referenced JavaScript collection is an explicit opt-in. Each external `src` is fetched
+through the same per-request DNS validation and pinned connection path as the main scan;
+only its sanitized URL, HTTP status, byte count, truncation state, and SHA-256 checksum
+are retained. Script response bytes are discarded:
+
+```bash
+uv run --locked secman-web-check scan https://example.com \
+  --javascript-inventory --format all --fail-on none
+```
+
+An optional OpenRouter system review can evaluate the sanitized scan evidence. It is
+never enabled by default and does not send raw HTTP response bodies. The system prompt
+is always read from a file: the packaged `src/prompts/system-review.txt` by default, or
+a user-maintained file selected with `--llm-prompt`. Focused templates are also packaged
+as `src/prompts/aws-security-review.txt` and
+`src/prompts/secrets-security-review.txt`.
+
+```bash
+export OPENROUTER_API_KEY='load-from-your-secret-manager'
+uv run --locked secman-web-check scan https://example.com \
+  --javascript-inventory --llm-review \
+  --llm-prompt ./my-system-review-prompt.txt --fail-on none
+```
+
+For example, select the AWS-focused template with
+`--llm-prompt src/prompts/aws-security-review.txt`. The AWS and secrets templates require
+evidence-backed conclusions, prohibit guessing unobserved cloud configuration or secret
+values, and preserve the scanner's passive boundary.
+
 You can also activate the virtual environment and use the installed command directly:
 
 ```bash

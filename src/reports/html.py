@@ -31,6 +31,15 @@ def write_html(run: ScanRun, path: Path) -> Path:
             "</tr>"
             for component in target.components
         )
+        javascript_rows = "".join(
+            "<tr>"
+            f"<td>{escape(asset.url)}</td>"
+            f"<td><code>{escape(asset.sha256)}</code></td>"
+            f"<td>{asset.size_bytes}</td>"
+            f"<td>{asset.status_code}</td>"
+            "</tr>"
+            for asset in target.javascript_assets
+        )
         errors = "".join(f"<li>{escape(error)}</li>" for error in target.errors)
         exposure = "Not observed"
         if target.exposure is not None:
@@ -54,6 +63,9 @@ def write_html(run: ScanRun, path: Path) -> Path:
             "<h3>Software components</h3>"
             "<table><thead><tr><th>Category</th><th>Component</th><th>Version</th>"
             f"<th>Evidence</th></tr></thead><tbody>{component_rows}</tbody></table>"
+            "<h3>JavaScript assets</h3>"
+            "<table><thead><tr><th>URL</th><th>SHA-256</th><th>Bytes</th><th>HTTP</th>"
+            f"</tr></thead><tbody>{javascript_rows}</tbody></table>"
             "<h3>Security findings</h3>"
             "<table><thead><tr><th>Severity</th><th>Rule</th><th>Title</th>"
             f"<th>Evidence</th><th>Recommendation</th></tr></thead><tbody>{finding_rows}</tbody></table>"

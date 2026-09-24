@@ -58,3 +58,17 @@ def render_terminal(run: ScanRun, console: Console | None = None) -> None:
                     component.evidence,
                 )
             output.print(components)
+        if target.javascript_assets:
+            scripts = Table(show_header=True)
+            scripts.add_column("JavaScript URL")
+            scripts.add_column("SHA-256")
+            scripts.add_column("Bytes", justify="right")
+            scripts.add_column("HTTP")
+            for asset in target.javascript_assets:
+                scripts.add_row(
+                    asset.url,
+                    asset.sha256,
+                    str(asset.size_bytes),
+                    str(asset.status_code),
+                )
+            output.print(scripts)

@@ -20,7 +20,15 @@ from .config import ScannerConfig
 from .discovery import discover_paths
 from .external_scanners import scan_with_external
 from .http import CollectionError, HttpCollector
-from .models import ExposureObservation, Reachability, ScanRun, TargetResult, TargetStatus
+from .javascript import inventory_javascript
+from .models import (
+    ExposureObservation,
+    JavaScriptAsset,
+    Reachability,
+    ScanRun,
+    TargetResult,
+    TargetStatus,
+)
 from .targets import AddressDenied, AddressPolicy, NormalizedTarget, normalize_target
 from .tls import TlsScanner
 
@@ -46,6 +54,7 @@ def scan_target(
     tls_scanner: TlsScanner | None = None,
     dirbuster: bool = False,
     external_scanners: tuple[str, ...] = (),
+    javascript: bool = False,
 ) -> TargetResult:
     """Scan one explicit target; errors are sanitized and retained on its result."""
     started = datetime.now(UTC)
@@ -106,6 +115,12 @@ def scan_target(
         findings.extend(external.findings)
         errors.extend(external.errors)
 
+    javascript_assets: tuple[JavaScriptAsset, ...] = ()
+    if javascript:
+        inventory = inventory_javascript(response, http)
+        javascript_assets = inventory.assets
+        errors.extend(inventory.errors)
+
     try:
         tls_evidence, tls_findings = tls.scan(effective_target)
         findings.extend(tls_findings)
@@ -127,6 +142,7 @@ def scan_target(
         status=TargetStatus.SUCCESS if complete else TargetStatus.PARTIAL,
         findings=tuple(unique.values()),
         components=components,
+        javascript_assets=javascript_assets,
         exposure=ExposureObservation(
             configured_url=sanitize_inventory_url(target.url) or target.url,
             effective_url=sanitize_inventory_url(response.url),
@@ -150,6 +166,7 @@ def scan_all(
     progress: ProgressCallback | None = None,
     dirbuster: bool = False,
     external_scanners: tuple[str, ...] = (),
+    javascript: bool = False,
 ) -> ScanRun:
     """Scan a bounded target list concurrently without cancelling sibling targets."""
     started = datetime.now(UTC)
@@ -158,13 +175,14 @@ def scan_all(
     with ThreadPoolExecutor(max_workers=config.concurrency) as executor:
         future_indexes = {}
         for index, target in enumerate(targets):
-            if dirbuster or external_scanners:
+            if dirbuster or external_scanners or javascript:
                 future = executor.submit(
                     scan_target,
                     target,
                     config,
                     dirbuster=dirbuster,
                     external_scanners=external_scanners,
+                    javascript=javascript,
                 )
             else:
                 future = executor.submit(scan_target, target, config)
