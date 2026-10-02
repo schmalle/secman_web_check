@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 import os
+from dataclasses import replace
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -19,11 +21,14 @@ from rich.progress import (
 )
 from rich.table import Table
 
+from .agent import AgentOptions
 from .config import load_config
+from .crawler import CrawlOptions, allowed_origin, openapi_get_paths
 from .external_scanners import SUPPORTED_SCANNERS
-from .models import ScanRun, Severity, TargetResult, TargetStatus
+from .models import ScanRun, Severity, TargetResult, TargetStatus, public_url
 from .orchestrator import scan_all
 from .reports import render_terminal, write_html, write_json, write_sarif
+from .reports.compare import compare_reports
 from .secman import (
     AmbiguousSubject,
     IntegrationClient,
@@ -86,7 +91,7 @@ class _ScanProgress:
         duration = (result.completed_at - result.started_at).total_seconds()
         style = _STATUS_STYLES.get(result.status, "white")
         self._progress.console.print(
-            f"[dim]\\[{completed}/{total}][/dim] {escape(result.target.url)} — "
+            f"[dim]\\[{completed}/{total}][/dim] {escape(public_url(result.target.url))} — "
             f"[{style}]{result.status.value}[/{style}] · "
             f"{len(result.findings)} findings · {len(result.errors)} errors · {duration:.1f}s"
         )
@@ -142,7 +147,10 @@ def _targets_from_secman(scanner_id: int) -> tuple[NormalizedTarget, ...]:
         return targets_from_subjects(client.list_subjects(scanner_id))
 
 
-def _push_to_secman(run: ScanRun, *, active: bool, scanner_id: int, mode: str) -> None:
+def _push_to_secman(
+    run: ScanRun, *, active: bool, scanner_id: int, mode: str, terminal_coverage: bool = True
+) -> None:
+    terminal_coverage = terminal_coverage and mode != "visual"
     with _integration_client() as client:
         subjects = client.list_subjects(scanner_id)
         subjects_by_id = {subject.id: subject for subject in subjects}
@@ -185,12 +193,24 @@ def _push_to_secman(run: ScanRun, *, active: bool, scanner_id: int, mode: str) -
                 body = build_run_body(
                     scanner_id,
                     subject,
-                    result,
+                    result
+                    if terminal_coverage
+                    else replace(result, complete=False, inventory_complete=False),
                     metadata={
-                        "scannerVersion": "0.2.0",
+                        "scannerVersion": "0.3.0",
                         "scanMode": mode,
+                        "profile": run.profile,
                         "securityMode": "active" if active else "passive",
                         "awsAccountNumber": result.target.aws_account_number,
+                        "coverage": {
+                            "pagesScanned": result.coverage.pages_scanned,
+                            "pagesDiscovered": result.coverage.pages_discovered,
+                            "crawlRequests": result.coverage.crawl_requests,
+                            "httpRequests": result.coverage.http_requests,
+                            "crawlComplete": result.coverage.crawl_complete,
+                            "agentActions": result.coverage.agent_actions,
+                            "agentComplete": result.coverage.agent_complete,
+                        },
                     },
                 )
                 client.submit_run(body)
@@ -203,9 +223,13 @@ def _push_to_secman(run: ScanRun, *, active: bool, scanner_id: int, mode: str) -
 
 
 def _scanner_id(mode: str, *, combined: bool) -> int:
-    variable = "SECMAN_SECURITY_SCANNER_ID" if mode == "security" else "SECMAN_VISUAL_SCANNER_ID"
+    variable = {
+        "security": "SECMAN_SECURITY_SCANNER_ID",
+        "extended": "SECMAN_EXTENDED_SCANNER_ID",
+        "visual": "SECMAN_VISUAL_SCANNER_ID",
+    }[mode]
     value = os.environ.get(variable)
-    if value is None and not combined:
+    if value is None and not combined and mode != "extended":
         value = os.environ.get("SECMAN_SCANNER_ID")
     try:
         scanner_id = int(value or "")
@@ -275,6 +299,36 @@ def scan(
             help="Explicitly enable bounded, non-recursive path discovery on HTTP 200 targets.",
         ),
     ] = False,
+    crawl: Annotated[
+        bool,
+        typer.Option("--crawl", help="Follow public HTML links within a bounded origin scope."),
+    ] = False,
+    allowed_origins: Annotated[
+        list[str] | None,
+        typer.Option("--allowed-origin", help="Additional HTTP(S) origin allowed during crawling."),
+    ] = None,
+    max_pages: Annotated[
+        int,
+        typer.Option("--max-pages", min=1, help="Maximum pages per crawled target."),
+    ] = 50,
+    max_depth: Annotated[
+        int,
+        typer.Option("--max-depth", min=0, help="Maximum link depth from the target page."),
+    ] = 2,
+    max_requests: Annotated[
+        int,
+        typer.Option("--max-requests", min=1, help="Maximum crawl requests per target."),
+    ] = 200,
+    api_spec: Annotated[
+        Path | None,
+        typer.Option(
+            "--api-spec", help="Local OpenAPI JSON file with public GET paths for crawling."
+        ),
+    ] = None,
+    ai_agent: Annotated[
+        bool,
+        typer.Option("--ai-agent", help="Let OpenRouter sequence approved active checks."),
+    ] = False,
     external_scanner: Annotated[
         list[str] | None,
         typer.Option(
@@ -301,6 +355,13 @@ def scan(
         typer.Option(
             "--visual-output-dir",
             help="Screenshot directory (default: OUTPUT_DIR/screenshots).",
+        ),
+    ] = None,
+    visual_redacted_crops: Annotated[
+        Path | None,
+        typer.Option(
+            "--visual-redacted-crops",
+            help="Directory of operator-reviewed PNG crops for OpenRouter; filenames match screenshots.",
         ),
     ] = None,
     allow_private_targets: Annotated[
@@ -351,8 +412,28 @@ def scan(
         raise typer.BadParameter(
             f"--external-scanner must be nuclei or nikto, not {min(unknown_scanners)}"
         )
-    if (dirbuster or selected_scanners) and scan_mode == "visual":
-        raise typer.BadParameter("active discovery and external scanners require a security scan")
+    if (dirbuster or selected_scanners or crawl or ai_agent) and scan_mode == "visual":
+        raise typer.BadParameter(
+            "discovery, external scanners and AI agent require a security scan"
+        )
+    if allowed_origins and not crawl and scan_mode == "security":
+        raise typer.BadParameter("--allowed-origin requires --crawl or a visual scan")
+    if api_spec is not None and not crawl:
+        raise typer.BadParameter("--api-spec requires --crawl")
+    try:
+        crawl_options = (
+            CrawlOptions(
+                allowed_origins=frozenset(allowed_origin(value) for value in allowed_origins or ()),
+                max_pages=max_pages,
+                max_depth=max_depth,
+                max_requests=max_requests,
+                seed_paths=openapi_get_paths(api_spec) if api_spec is not None else (),
+            )
+            if crawl
+            else None
+        )
+    except (OSError, TargetError, TypeError, ValueError) as error:
+        raise typer.BadParameter(str(error)) from error
     requested = tuple(formats or ("terminal",))
     if "all" in requested:
         requested = ("terminal", "json", "sarif", "html")
@@ -370,17 +451,34 @@ def scan(
             active=True if active else None,
             allow_private_targets=True if allow_private_targets else None,
         )
+        if ai_agent and not scan_config.active:
+            raise typer.BadParameter("--ai-agent requires --active for approved check actions")
+        agent_options = (
+            AgentOptions(
+                api_key=os.environ.get("SECMAN_AI_API_KEY", ""),
+                model=os.environ.get("SECMAN_AI_MODEL", "anthropic/claude-sonnet-4.5"),
+                base_url=os.environ.get("SECMAN_AI_BASE_URL", "https://openrouter.ai/api/v1"),
+            )
+            if ai_agent
+            else None
+        )
+        extended = bool(scan_config.active or dirbuster or selected_scanners or crawl or ai_agent)
+        if push_to_secman:
+            if scan_mode in {"security", "both"}:
+                _scanner_id("extended" if extended else "security", combined=scan_mode == "both")
+            if scan_mode in {"visual", "both"}:
+                _scanner_id("visual", combined=scan_mode == "both")
         if targets_from_secman:
-            source_mode = "visual" if scan_mode == "visual" else "security"
+            source_mode = (
+                "visual" if scan_mode == "visual" else ("extended" if extended else "security")
+            )
             error_console.print("[dim]Fetching authorized subjects from SecMan…[/dim]")
             targets = _targets_from_secman(_scanner_id(source_mode, combined=scan_mode == "both"))
         else:
             loaded_targets = load_targets(target, targets_file, targets_csv, strict=strict)
             targets = loaded_targets.targets
             for skipped in loaded_targets.skipped:
-                error_console.print(
-                    f"[yellow]Skipped invalid target[/yellow] {skipped.value!r}: {skipped.reason}"
-                )
+                error_console.print(f"[yellow]Skipped invalid target[/yellow]: {skipped.reason}")
     except (OSError, TypeError, ValueError, TargetError, SecmanIntegrationError) as error:
         raise typer.BadParameter(str(error)) from error
     if not targets:
@@ -395,6 +493,8 @@ def scan(
                 api_key=os.environ.get("SECMAN_VISION_API_KEY"),
                 model=os.environ.get("SECMAN_VISION_MODEL", "anthropic/claude-sonnet-4.5"),
                 base_url=os.environ.get("SECMAN_VISION_BASE_URL", "https://openrouter.ai/api/v1"),
+                allowed_origins=frozenset(allowed_origin(value) for value in allowed_origins or ()),
+                redacted_crops=visual_redacted_crops,
             )
         except ValueError as error:
             raise typer.BadParameter(str(error)) from error
@@ -408,13 +508,20 @@ def scan(
             f"{'active' if scan_config.active else 'passive'} mode",
         )
         try:
-            if dirbuster or selected_scanners:
+            if (
+                dirbuster
+                or selected_scanners
+                or crawl_options is not None
+                or agent_options is not None
+            ):
                 security_run = scan_all(
                     targets,
                     scan_config,
                     progress=security_progress,
                     dirbuster=dirbuster,
                     external_scanners=selected_scanners,
+                    crawl_options=crawl_options,
+                    agent_options=agent_options,
                 )
             else:
                 security_run = scan_all(targets, scan_config, progress=security_progress)
@@ -466,8 +573,11 @@ def scan(
                 _push_to_secman(
                     security_run,
                     active=scan_config.active,
-                    scanner_id=_scanner_id("security", combined=combined),
-                    mode="security",
+                    scanner_id=_scanner_id(
+                        "extended" if extended else "security", combined=combined
+                    ),
+                    mode="security-extended" if extended else "security",
+                    **({"terminal_coverage": False} if extended else {}),
                 )
             if visual_run is not None:
                 error_console.print(
@@ -492,6 +602,31 @@ def scan(
             for finding in result.findings
         ):
             raise typer.Exit(1)
+
+
+@app.command()
+def compare(
+    old: Annotated[Path, typer.Argument(help="Earlier local JSON report.")],
+    new: Annotated[Path, typer.Argument(help="Later local JSON report.")],
+    json_output: Annotated[
+        bool, typer.Option("--json", help="Print machine-readable comparison JSON.")
+    ] = False,
+) -> None:
+    """Compare stable finding IDs without claiming resolution from partial coverage."""
+    try:
+        result = compare_reports(old, new)
+    except (OSError, TypeError, ValueError) as error:
+        raise typer.BadParameter(str(error)) from error
+    if json_output:
+        typer.echo(json.dumps(result, sort_keys=True))
+        return
+    console.print(
+        f"[bold]Comparison[/bold] {escape(str(result['oldRunId']))} "
+        f"→ {escape(str(result['newRunId']))}"
+    )
+    for name in ("introduced", "resolved", "unconfirmedAbsent"):
+        console.print(f"{name}: {len(result[name])}")
+    console.print(f"unchanged: {result['unchangedCount']}")
 
 
 @db_app.command("install")

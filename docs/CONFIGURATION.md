@@ -27,8 +27,9 @@ MariaDB environment variables:
 SecMan environment variables:
 
 - Required: `SECMAN_URL` using HTTPS.
-- Scanner IDs: `SECMAN_SECURITY_SCANNER_ID` for security mode and
-  `SECMAN_VISUAL_SCANNER_ID` for visual mode. A single-mode run may use the legacy
+- Scanner IDs: `SECMAN_SECURITY_SCANNER_ID` for baseline security mode,
+  `SECMAN_EXTENDED_SCANNER_ID` for opt-in extended security checks, and
+  `SECMAN_VISUAL_SCANNER_ID` for visual mode. A baseline single-mode run may use the legacy
   `SECMAN_SCANNER_ID`; combined runs deliberately require both mode-specific IDs.
 - Authentication: `SECMAN_TOKEN`, or both `SECMAN_USERNAME` and `SECMAN_PASSWORD`.
 
@@ -37,6 +38,20 @@ Visual analysis environment variables:
 - `SECMAN_VISION_API_KEY`: required unless `--visual-no-ai` is selected.
 - `SECMAN_VISION_MODEL`: optional model slug.
 - `SECMAN_VISION_BASE_URL`: optional public HTTPS OpenAI-compatible API base URL.
+- `--visual-redacted-crops DIR`: required for remote visual analysis; the directory must
+  contain operator-reviewed PNG crops named like the local screenshots.
+
+Autonomous check selection requires both `--active` and `--ai-agent`:
+
+- `SECMAN_AI_API_KEY`: OpenRouter key, required for the agent.
+- `SECMAN_AI_MODEL`: optional model slug.
+- `SECMAN_AI_BASE_URL`: optional HTTPS API base URL.
+
+Crawl limits are CLI options: `--max-pages` (50), `--max-depth` (2), and
+`--max-requests` (200). `--api-spec` reads a local OpenAPI JSON document of at most
+1 MB and seeds only literal GET paths. `--allowed-origin` is repeatable and grants
+additional origins for crawling or visual resources. These options do not change the
+default non-crawling scan.
 
 Load secrets from a secret manager into the process environment. Do not commit a filled
 `.env` file or pass secrets as shell arguments.
@@ -50,3 +65,17 @@ For production AWS workloads, store an allowlisted JSON object in Secrets Manage
 run `scripts/scan-with-aws-secrets.py --secret-id NAME -- SCAN_ARGS`. The wrapper uses
 the standard AWS CLI credential chain, rejects unknown secret keys, places values only
 in the scanner child environment, and always adds `--push-to-secman`.
+
+
+HTTP requests have a cumulative 60-second deadline across redirects, including socket
+connect, TLS negotiation, headers and body reads. `request_timeout_seconds` and
+`SECMAN_WEB_CHECK_REQUEST_TIMEOUT_SECONDS` configure it. HTTP requests across a target
+share a 300-second budget (`target_timeout_seconds`,
+`SECMAN_WEB_CHECK_TARGET_TIMEOUT_SECONDS`), preserved across collector clones and optional
+HTTP probes. Expired requests produce incomplete target results; sibling results remain.
+The security batch orchestrator additionally isolates each target in a spawned worker
+with the same target deadline. On expiry it terminates the worker (and its process group
+on POSIX), reports that target as failed/incomplete, and retains completed sibling targets.
+This outer deadline includes DNS, TLS, provider and external-tool analysis. Direct
+`scan_target` callers and browser interception retain HTTP-operation deadlines; those
+in-process calls do not interrupt a blocked operating-system resolver.

@@ -17,5 +17,7 @@ All target-controlled values use DB-API parameters. A run write is transactional
 failure rolls it back and returns exit code 2 without removing reports already generated
 on disk.
 
-Use a trusted CA with `SECMAN_WEB_CHECK_DB_SSL_CA` when the database requires TLS. The
+All database connections require TLS with certificate and hostname verification. System trust
+roots are used by default; set `SECMAN_WEB_CHECK_DB_SSL_CA` for a private CA. Servers without
+TLS support and untrusted certificates fail before authentication; plaintext fallback is disabled. The
 scanner never prints or persists the database password.

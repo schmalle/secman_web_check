@@ -41,6 +41,11 @@ def test_help_documents_safety_and_integration_opt_ins():
         "--targets-from-secman",
         "--dirbuster",
         "--external-scanner",
+        "--crawl",
+        "--api-spec",
+        "--allowed-origin",
+        "--ai-agent",
+        "--visual-redacted-crops",
     ):
         assert option in result.output
 
@@ -50,6 +55,17 @@ def test_external_scanner_is_explicit_and_validated():
 
     assert result.exit_code == 2
     assert "must be nuclei or nikto" in result.output
+
+
+def test_ai_agent_requires_active_and_environment_key(monkeypatch):
+    without_active = runner.invoke(app, ["scan", "https://example.com", "--ai-agent"])
+    assert without_active.exit_code == 2
+    assert "--ai-agent requires --active" in without_active.output
+
+    monkeypatch.delenv("SECMAN_AI_API_KEY", raising=False)
+    without_key = runner.invoke(app, ["scan", "https://example.com", "--ai-agent", "--active"])
+    assert without_key.exit_code == 2
+    assert "AI agent requires" in without_key.output
 
 
 def test_scan_rejects_missing_or_conflicting_target_sources(tmp_path):
@@ -97,7 +113,7 @@ def test_scan_skips_invalid_target_file_lines_without_strict(monkeypatch, tmp_pa
 
     assert result.exit_code == 0, result.output
     assert [target.host for target in scanned[0]] == ["example.com"]
-    assert "ftp://unsupported.example" in result.output
+    assert "Skipped invalid target" in result.output
     assert "Security scan: 1 target" in result.output
     assert "[1/1] https://example.com/" in result.output
 
@@ -188,6 +204,47 @@ def test_csv_scan_can_submit_results_directly_to_secman(monkeypatch, tmp_path):
     assert uploads[0][0].targets[0].target.aws_account_number == "111122223333"
     assert uploads[0][1] is False
     assert uploads[0][2:] == (42, "security")
+
+
+def test_extended_upload_requires_separate_scanner_before_scanning(monkeypatch):
+    monkeypatch.delenv("SECMAN_EXTENDED_SCANNER_ID", raising=False)
+    monkeypatch.setattr(
+        "secman_web_check.cli.scan_all",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("scan started")),
+    )
+
+    result = runner.invoke(app, ["scan", "https://example.com", "--active", "--push-to-secman"])
+
+    assert result.exit_code == 2
+    assert "SECMAN_EXTENDED_SCANNER_ID" in result.output
+
+
+def test_extended_upload_never_sets_terminal_coverage(monkeypatch, tmp_path):
+    uploads = []
+    monkeypatch.setenv("SECMAN_EXTENDED_SCANNER_ID", "43")
+    monkeypatch.setattr("secman_web_check.cli.scan_all", clean_run)
+    monkeypatch.setattr(
+        "secman_web_check.cli._push_to_secman",
+        lambda run, **kwargs: uploads.append(kwargs),
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "scan",
+            "https://example.com",
+            "--active",
+            "--push-to-secman",
+            "--output-dir",
+            str(tmp_path),
+            "--fail-on",
+            "none",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert uploads[0]["scanner_id"] == 43
+    assert uploads[0]["terminal_coverage"] is False
 
 
 def test_visual_mode_is_selectable_without_running_security(monkeypatch, tmp_path):
@@ -284,3 +341,12 @@ def test_secman_loaded_target_uses_same_asset_binding_for_other_scanner(monkeypa
     _push_to_secman(run, active=False, scanner_id=42, mode="visual")
 
     assert uploads[0]["subjectId"] == 40
+    assert uploads[0]["completeCoverage"] is False
+    _push_to_secman(
+        run,
+        active=True,
+        scanner_id=42,
+        mode="security-extended",
+        terminal_coverage=False,
+    )
+    assert uploads[1]["completeCoverage"] is False

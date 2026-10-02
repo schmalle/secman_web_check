@@ -5,17 +5,22 @@ from __future__ import annotations
 from rich.console import Console
 from rich.table import Table
 
-from ..models import ScanRun
+from ..models import ScanRun, public_url
 
 
 def render_terminal(run: ScanRun, console: Console | None = None) -> None:
     output = console if console is not None else Console()
-    output.print(f"[bold]SecMan web-security scan[/bold] {run.run_id}")
+    output.print(f"[bold]SecMan web-security scan[/bold] {run.run_id} ({run.profile})")
     for target in run.targets:
         output.print(
-            f"\n[bold]{target.target.url}[/bold] — {target.status.value} "
+            f"\n[bold]{public_url(target.target.url)}[/bold] — {target.status.value} "
             f"({len(target.findings)} findings, {len(target.components)} components)"
         )
+        if target.coverage.pages_discovered:
+            output.print(
+                f"Coverage: {target.coverage.pages_scanned} pages scanned, "
+                f"{target.coverage.pages_discovered} discovered"
+            )
         if target.exposure is not None:
             status = (
                 "-" if target.exposure.http_status is None else str(target.exposure.http_status)

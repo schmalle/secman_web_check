@@ -98,3 +98,73 @@ def test_store_parameterizes_target_controlled_values():
     assert any(
         component.component_key in params for _sql, params in connection.value.executions if params
     )
+
+
+def test_database_uses_verified_tls_with_system_trust(monkeypatch):
+    import ssl
+
+    import pymysql
+
+    from secman_web_check.storage import DatabaseSettings, connect_database
+
+    captured = {}
+    monkeypatch.setattr(pymysql, "connect", lambda **kwargs: captured.update(kwargs))
+    connect_database(DatabaseSettings("db.example.com", "scanner", "secret"))
+    context = captured["ssl"]
+    assert context.check_hostname
+    assert context.verify_mode == ssl.CERT_REQUIRED
+    assert context.get_ca_certs()
+
+
+def test_database_without_ssl_support_fails_before_authentication():
+    import ssl
+
+    import pytest
+    from pymysql.connections import Connection as DriverConnection
+    from pymysql.err import OperationalError
+
+    connection = DriverConnection(
+        host="db.example.com",
+        user="scanner",
+        password="secret",
+        ssl=ssl.create_default_context(),
+        defer_connect=True,
+    )
+    connection.server_version = "8.0.0"
+    connection.server_capabilities = 0
+    packets = []
+    connection.write_packet = packets.append
+    with pytest.raises(OperationalError, match="SSL is required"):
+        connection._request_authentication()
+    assert packets == []
+
+
+def test_database_custom_ca_and_ca_errors_are_sanitized(monkeypatch):
+    import ssl
+
+    import pymysql
+    import pytest
+
+    from secman_web_check.storage import DatabaseSettings, StorageError, connect_database
+
+    original = ssl.create_default_context
+    seen = []
+
+    def context(*, cafile):
+        seen.append(cafile)
+        return original()
+
+    monkeypatch.setattr(ssl, "create_default_context", context)
+    monkeypatch.setattr(pymysql, "connect", lambda **kwargs: kwargs["ssl"])
+    verified = connect_database(
+        DatabaseSettings("db.example.com", "scanner", "secret", ssl_ca="private-ca.pem")
+    )
+    assert seen == ["private-ca.pem"]
+    assert verified.check_hostname and verified.verify_mode == ssl.CERT_REQUIRED
+    monkeypatch.setattr(
+        ssl,
+        "create_default_context",
+        lambda **kwargs: (_ for _ in ()).throw(OSError("private-ca.pem sensitive")),
+    )
+    with pytest.raises(StorageError, match="^MariaDB connection failed$"):
+        connect_database(DatabaseSettings("db.example.com", "scanner", "secret"))

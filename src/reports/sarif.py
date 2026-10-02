@@ -50,12 +50,12 @@ def write_sarif(run: ScanRun, path: Path) -> Path:
                 "tool": {
                     "driver": {
                         "name": "secman-web-check",
-                        "version": "0.2.0",
+                        "version": "0.3.0",
                         "rules": list(rules.values()),
                     }
                 },
                 "results": results,
-                "properties": {"runId": run.run_id},
+                "properties": {"runId": run.run_id, "profile": run.profile},
             }
         ],
     }

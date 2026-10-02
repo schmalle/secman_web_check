@@ -159,3 +159,38 @@ def test_security_txt_not_collected_is_not_reported_missing():
         now=datetime(2026, 1, 1, tzinfo=UTC),
     )
     assert check_content(ctx) == ()
+
+
+@pytest.mark.parametrize(
+    "label",
+    [
+        "PRIVATE KEY",
+        "RSA PRIVATE KEY",
+        "EC PRIVATE KEY",
+        "OPENSSH PRIVATE KEY",
+        "ENCRYPTED PRIVATE KEY",
+    ],
+)
+def test_linear_pem_detector_preserves_supported_labels(label):
+    from secman_web_check.checks.content import _has_private_key
+
+    assert _has_private_key(f"-----BEGIN {label}-----\nmaterial\n-----END {label}-----")
+    assert not _has_private_key(f"-----BEGIN {label}-----\n \t\n-----END {label}-----")
+    assert not _has_private_key(f"-----BEGIN {label}-----\nmaterial")
+
+
+def test_linear_pem_detector_handles_large_unmatched_input_and_later_valid_block():
+    from time import monotonic
+
+    from secman_web_check.checks.content import _has_private_key
+
+    attack = "-----BEGIN PRIVATE KEY-----\nx\n" * 30000
+    started = monotonic()
+    assert not _has_private_key(attack)
+    assert monotonic() - started < 1.0
+    assert _has_private_key(attack + "-----END PRIVATE KEY-----")
+    assert _has_private_key(
+        "-----BEGIN PRIVATE KEY-----\n \n-----END PRIVATE KEY-----\n"
+        + "-----BEGIN RSA PRIVATE KEY-----\nmaterial\n-----END RSA PRIVATE KEY-----"
+    )
+    assert not _has_private_key("-----BEGIN RSA PRIVATE KEY-----\nx\n-----END EC PRIVATE KEY-----")

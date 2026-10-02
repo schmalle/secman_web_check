@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
 from hashlib import sha256
+from urllib.parse import urlsplit, urlunsplit
 
 from .targets import NormalizedTarget
 
@@ -46,6 +47,12 @@ def _now() -> datetime:
     return datetime.now(UTC)
 
 
+def public_url(value: str) -> str:
+    """Retain a location without potentially sensitive query or fragment values."""
+    parts = urlsplit(value)
+    return urlunsplit((parts.scheme, parts.netloc, parts.path or "/", "", ""))
+
+
 @dataclass(frozen=True, slots=True)
 class Finding:
     rule_id: str
@@ -81,6 +88,7 @@ class Finding:
         created_at: datetime | None = None,
     ) -> Finding:
         """Create a finding whose external identity is stable for rule and target."""
+        url = public_url(url)
         identity = sha256(f"{rule_id}\N{UNIT SEPARATOR}{url}".encode()).hexdigest()
         return cls(
             rule_id=rule_id,
@@ -148,6 +156,18 @@ class ExposureObservation:
 
 
 @dataclass(frozen=True, slots=True)
+class CoverageSummary:
+    pages_scanned: int = 0
+    pages_discovered: int = 0
+    pages: tuple[str, ...] = ()
+    crawl_requests: int = 0
+    http_requests: int = 0
+    crawl_complete: bool = True
+    agent_actions: int = 0
+    agent_complete: bool = True
+
+
+@dataclass(frozen=True, slots=True)
 class TargetResult:
     target: NormalizedTarget
     status: TargetStatus
@@ -155,6 +175,7 @@ class TargetResult:
     components: tuple[DetectedComponent, ...] = ()
     exposure: ExposureObservation | None = None
     inventory_complete: bool = False
+    coverage: CoverageSummary = field(default_factory=CoverageSummary)
     errors: tuple[str, ...] = ()
     complete: bool = True
     started_at: datetime = field(default_factory=_now)
@@ -171,6 +192,7 @@ class ScanRun:
     targets: tuple[TargetResult, ...]
     started_at: datetime = field(default_factory=_now)
     completed_at: datetime = field(default_factory=_now)
+    profile: str = "security:passive"
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "started_at", _utc(self.started_at))

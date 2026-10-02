@@ -1,8 +1,8 @@
 # Safety and authorization
 
 The scanner is intended only for systems the operator owns or is explicitly authorized
-to assess. It does not discover targets: every initial URL comes from the command line or
-the supplied target file.
+to assess. Every initial URL comes from the command line, a supplied target file, or an
+authorized SecMan subject. `--crawl` is required to follow links from that initial URL.
 
 ## Default passive behavior
 
@@ -33,10 +33,13 @@ are never written to reports, MariaDB, SecMan, or logs.
 | `GET` | `/.git/HEAD` | Git metadata exposure | valid `ref: refs/...` body shape |
 | `GET` | `/server-status` | operational status exposure | paired server-version and uptime signatures |
 | `GET` | `/wp-config.php.bak` | configuration backup | PHP plus DB name/password signatures |
+| `GET` | `/?next=https%3A%2F%2Fscanner.invalid%2F` | open redirect | response redirects to the inert canary origin; the scanner does not follow it |
 
 All active requests reuse the same address, redirect, TLS, header, body, and timeout
 controls as passive collection. Operators cannot supply arbitrary active paths, methods,
 headers, or payloads.
+If the initial target redirects to another origin, the scanner skips active probes,
+content discovery, external adapters, and AI-selected actions for that target.
 
 ## Private targets
 
@@ -46,22 +49,25 @@ special-purpose ranges, and it does not enable active probes.
 
 ## Visual browser boundary
 
-Visual mode starts a fresh headless Chromium context and applies the same address
-policy to the initial page, redirects, frames, and subresources. Media and WebSocket
-requests are disabled; `data:` and `blob:` resources generated inside the selected
-page remain available. The final navigation address is checked again before page text
-or a screenshot is retained. Screenshots are capped at 4000 pixels in height.
+Visual mode starts a fresh headless Chromium context. HTTP(S) browser requests are
+intercepted and fulfilled by the pinned HTTP collector, which validates every DNS
+answer and redirect before connection. Requests outside the selected origin and explicit
+`--allowed-origin` entries are blocked. Media, WebSocket, and non-GET/HEAD requests are
+blocked; `data:` and `blob:` resources generated inside the selected page remain
+available. Screenshots are capped at 4000 pixels in height.
 
-Vision analysis is optional and sends the screenshot plus a bounded page-text excerpt
-to the configured public HTTPS provider. The provider credential is read only from the
-process environment. Select `--visual-no-ai` when page content must not leave the
-scanner host.
+Vision analysis sends only an operator-reviewed PNG crop from
+`--visual-redacted-crops`; it rejects an identical copy of the raw screenshot. It sends
+the origin and HTTP status, not raw page text, title, URL query, or raw screenshot. Use
+`--visual-no-ai` when no reviewed crop is available. The credential is read only from
+the process environment. The operator is responsible for checking that a supplied crop
+is properly redacted.
 
 ## Prohibited behavior
 
-The tool does not crawl, enumerate ports, discover hosts, authenticate, replay cookies,
-brute-force, exploit, upload payloads, or fuzz arbitrary inputs. Visual mode executes
-only the explicitly selected pages and their policy-approved resources.
+The tool does not enumerate ports, discover hosts, authenticate, replay cookies,
+brute-force, exploit, upload payloads, or fuzz arbitrary inputs. Optional crawling is
+limited to public GET links, bounded depth, page count, and request count.
 Do not modify it to bypass target policy or TLS verification for operational scans.
 
 ## Optional extended checks

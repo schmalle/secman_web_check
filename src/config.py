@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import tomllib
 from collections.abc import Mapping
 from dataclasses import dataclass, fields
@@ -19,6 +20,8 @@ class ScannerConfig:
     max_redirects: int = 5
     connect_timeout_seconds: float = 10.0
     read_timeout_seconds: float = 20.0
+    request_timeout_seconds: float = 60.0
+    target_timeout_seconds: float = 300.0
 
     def __post_init__(self) -> None:
         if self.concurrency < 1:
@@ -27,7 +30,15 @@ class ScannerConfig:
             raise ValueError("max_body_bytes must be at least 1")
         if self.max_redirects < 0:
             raise ValueError("max_redirects must not be negative")
-        if self.connect_timeout_seconds <= 0 or self.read_timeout_seconds <= 0:
+        if any(
+            not math.isfinite(value) or value <= 0
+            for value in (
+                self.connect_timeout_seconds,
+                self.read_timeout_seconds,
+                self.request_timeout_seconds,
+                self.target_timeout_seconds,
+            )
+        ):
             raise ValueError("timeouts must be positive")
 
 
@@ -48,7 +59,12 @@ def _coerce(name: str, value: object) -> bool | int | float:
         if isinstance(value, (str, int)) and not isinstance(value, bool):
             return int(value)
         raise ValueError(f"{name} must be an integer")
-    if name in {"connect_timeout_seconds", "read_timeout_seconds"}:
+    if name in {
+        "connect_timeout_seconds",
+        "read_timeout_seconds",
+        "request_timeout_seconds",
+        "target_timeout_seconds",
+    }:
         if isinstance(value, (str, int, float)) and not isinstance(value, bool):
             return float(value)
         raise ValueError(f"{name} must be a number")
@@ -95,6 +111,12 @@ def load_config(
         max_redirects=int(_coerce("max_redirects", values.get("max_redirects", 5))),
         connect_timeout_seconds=float(
             _coerce("connect_timeout_seconds", values.get("connect_timeout_seconds", 10.0))
+        ),
+        request_timeout_seconds=float(
+            _coerce("request_timeout_seconds", values.get("request_timeout_seconds", 60.0))
+        ),
+        target_timeout_seconds=float(
+            _coerce("target_timeout_seconds", values.get("target_timeout_seconds", 300.0))
         ),
         read_timeout_seconds=float(
             _coerce("read_timeout_seconds", values.get("read_timeout_seconds", 20.0))

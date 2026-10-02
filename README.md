@@ -50,9 +50,9 @@ Select the scan approach explicitly:
 # HTTP/TLS checks only (the backward-compatible default)
 uv run --locked secman-web-check scan https://example.com --scan-mode security
 
-# Browser screenshot plus vision analysis
-SECMAN_VISION_API_KEY='load-from-your-secret-manager' \
-  uv run --locked secman-web-check scan https://example.com --scan-mode visual
+# Browser screenshot without external image transfer
+uv run --locked secman-web-check scan https://example.com \
+  --scan-mode visual --visual-no-ai
 
 # Security and visual scans in one local report
 uv run --locked secman-web-check scan https://example.com \
@@ -62,8 +62,40 @@ uv run --locked secman-web-check scan https://example.com \
 `--visual-no-ai` performs deterministic screenshot capture without a model call, so it
 cannot report visual-content findings. Screenshots are written below
 `OUTPUT_DIR/screenshots` unless `--visual-output-dir` is supplied. Full-page captures
-are capped at 4000 pixels. Only final HTTP 200 responses are captured or sent to the
-OpenRouter-compatible vision endpoint; credentials are read only from the environment.
+are capped at 4000 pixels. Only final HTTP 200 responses are captured. To use OpenRouter,
+review and redact a local PNG, place a crop with the same filename in a separate
+directory, and rerun with `--visual-redacted-crops DIR` and `SECMAN_VISION_API_KEY`.
+The raw screenshot and page text are never sent to the provider.
+
+Discover linked public pages and literal GET paths from a local OpenAPI JSON file:
+
+```bash
+uv run --locked secman-web-check scan https://example.com \
+  --crawl --api-spec openapi.json --max-pages 50 --max-depth 2 \
+  --format json --fail-on none
+```
+
+`--crawl` stays on the target origin. A repeatable `--allowed-origin URL` grants additional
+origins explicitly. The default crawl ceiling is 50 pages, depth 2, and 200 requests per
+target. Incomplete coverage marks the target partial.
+
+Let OpenRouter sequence only reviewed active probes:
+
+```bash
+SECMAN_AI_API_KEY='load-from-your-secret-manager' \
+  uv run --locked secman-web-check scan https://example.com \
+  --active --ai-agent --format json --fail-on none
+```
+
+The model sees rule IDs, severities, and an origin. It cannot supply request URLs,
+methods, headers, or payloads. See [AI agent and image privacy](docs/AI_AGENT.md).
+
+Compare two local JSON reports without treating a partial or different-profile scan as
+proof that an old finding was fixed:
+
+```bash
+uv run --locked secman-web-check compare old.json new.json --json
+```
 
 Scan one public target using safe defaults:
 
@@ -190,7 +222,7 @@ progress bar. Reports stay on stdout and in the output directory, so piping stdo
 remains clean.
 
 `--format` is repeatable and accepts `terminal`, `json`, `sarif`, `html`, or `all`.
-Terminal is the default. JSON uses schema version `1.1`; SARIF uses version `2.1.0`;
+Terminal is the default. JSON uses schema version `1.2`; SARIF uses version `2.1.0`;
 HTML is self-contained, script-free, escaped, and protected by a restrictive CSP.
 
 `--fail-on` accepts `info`, `low`, `medium`, `high`, `critical`, or `none` and defaults
@@ -239,9 +271,11 @@ See [MariaDB setup](docs/DATABASE.md) before applying the example grants.
 ## Optional SecMan upload
 
 Register separate SecMan scanners for independent lifecycle snapshots: source
-`WEB_SECURITY` for security results and source `VISUAL` for visual results. Assign the
-same authorized subjects where appropriate. A combined run requires both IDs so one
-mode can never resolve findings owned by the other.
+`WEB_SECURITY` for baseline security and a second `WEB_SECURITY` registration for
+extended security checks, plus source `VISUAL` for visual results. Assign the same
+authorized subjects where appropriate. Extended runs require
+`SECMAN_EXTENDED_SCANNER_ID`; their snapshots do not auto-resolve absent findings.
+A combined run requires the IDs for both selected modes.
 
 ```bash
 export SECMAN_URL=https://secman.example.invalid
@@ -312,12 +346,14 @@ mock adapters; they do not require a live target, MariaDB instance, or SecMan de
 - [Report formats](docs/REPORTS.md)
 - [MariaDB setup](docs/DATABASE.md)
 - [SecMan integration](docs/SECMAN.md)
+- [AI agent and image privacy](docs/AI_AGENT.md)
+- [Coverage matrix](docs/COVERAGE.md)
 
 ## Limitations
 
-- No crawling, discovery, authentication testing, exploitation, brute force, or
-  arbitrary fuzzing. Visual mode executes the selected page in isolated headless
-  Chromium with outbound destination checks on every request.
+- Crawling and AI-directed active checks require explicit flags. Authentication testing,
+  exploitation, brute force, and arbitrary fuzzing are not implemented. Browser requests
+  pass through the pinned HTTP collector within the selected origin scope.
 - Active findings use strong bounded signatures but may still require human validation.
 - HTTPS targets use SSLyze for the documented TLS capabilities; unavailable individual
   capabilities make the target partial instead of silently clean.

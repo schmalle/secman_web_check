@@ -3,11 +3,12 @@
 SecMan upload is disabled unless `--push-to-secman` is supplied. This is the direct
 result-import path; no separate export/import step is required.
 
-1. Register a `WEB_SECURITY` scanner for security results and a `VISUAL` scanner for
-   visual results.
+1. Register a `WEB_SECURITY` scanner for baseline security results, a second
+   `WEB_SECURITY` scanner for extended checks, and a `VISUAL` scanner for visual results
+   when those modes are needed.
 2. Assign their service users and bind only authorized asset subjects.
-3. Set `SECMAN_URL` to the HTTPS origin plus `SECMAN_SECURITY_SCANNER_ID` and/or
-   `SECMAN_VISUAL_SCANNER_ID` for the selected modes.
+3. Set `SECMAN_URL` to the HTTPS origin plus `SECMAN_SECURITY_SCANNER_ID`,
+   `SECMAN_EXTENDED_SCANNER_ID`, and/or `SECMAN_VISUAL_SCANNER_ID` for selected modes.
 4. Set `SECMAN_TOKEN`, or set `SECMAN_USERNAME` and `SECMAN_PASSWORD`.
 5. Run a local JSON report first, then repeat with `--push-to-secman`.
 
@@ -31,10 +32,19 @@ The exposure observation carries the received body length and marks a URL as
 Inventory coverage is independent of finding coverage. A successful complete inventory
 snapshot may resolve an absent component; partial, failed, or truncated collection never
 does. Visual snapshots do not submit component inventory.
+Visual uploads always set finding `completeCoverage=false`: model observations and
+screenshot-only runs cannot prove that an older visual finding is absent.
 
 A complete successful target may resolve older absent findings for that scanner/subject.
 Partial and failed results set `completeCoverage=false`, so they never resolve older
 findings. Stable external IDs and deterministic run keys make a retry idempotent.
+
+Active probes, crawling, directory discovery, external scanners, and AI agent runs use
+`SECMAN_EXTENDED_SCANNER_ID` with a separate `WEB_SECURITY` registration. Their upload
+sets finding and inventory `completeCoverage=false` until SecMan has a profile-aware
+coverage contract. This prevents selective checks from resolving older findings. Bind
+the same authorized assets to the extended registration before using
+`--targets-from-secman` for an extended run. Local reports retain actual scan status.
 
 TLS verification is mandatory. Authentication failures and response errors are
 sanitized; tokens, passwords, cookies, and raw web response bodies are not uploaded.
@@ -46,7 +56,7 @@ Security and visual results intentionally use separate scanner registrations. A
 combined run submits two atomic snapshots; the merged local report is not uploaded as
 a third snapshot. This prevents a security-only run from resolving visual findings, or
 the reverse. `SECMAN_SCANNER_ID` remains a compatibility fallback only for a
-single-mode run.
+single-mode baseline or visual run.
 
 ## Proton Pass credentials
 

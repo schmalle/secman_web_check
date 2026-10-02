@@ -57,6 +57,7 @@ and signature requirements.
 | `WEB-ACTIVE-GIT-EXPOSED` | HIGH |
 | `WEB-ACTIVE-SERVER-STATUS-EXPOSED` | MEDIUM |
 | `WEB-ACTIVE-CONFIG-BACKUP-EXPOSED` | HIGH |
+| `WEB-ACTIVE-OPEN-REDIRECT` | MEDIUM |
 
 ## TLS rules
 
@@ -94,6 +95,11 @@ and remediation), so terminal/JSON/SARIF/HTML, MariaDB, and SecMan output all us
 same record. Unknown versions do not produce vulnerability claims.
 
 ## Explicit discovery and external scanners
+
+`--crawl` follows public GET links and optional literal OpenAPI GET paths under an
+origin allowlist and strict page/depth/request limits. Passive checks are applied to
+each collected HTML response. `--ai-agent --active` lets OpenRouter select and sequence
+the reviewed active probes above; the deterministic matchers still decide findings.
 
 `--dirbuster` enables a fixed, non-recursive path allowlist only after an HTTP 200 root
 response. `--external-scanner nuclei` and `--external-scanner nikto` invoke optional

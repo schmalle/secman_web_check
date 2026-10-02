@@ -7,7 +7,14 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from ..models import DetectedComponent, ExposureObservation, Finding, ScanRun, TargetResult
+from ..models import (
+    DetectedComponent,
+    ExposureObservation,
+    Finding,
+    ScanRun,
+    TargetResult,
+    public_url,
+)
 from .common import atomic_write
 
 
@@ -61,11 +68,21 @@ def _exposure_document(exposure: ExposureObservation | None) -> dict[str, Any] |
 
 def _target_document(target: TargetResult) -> dict[str, Any]:
     return {
-        "url": target.target.url,
+        "url": public_url(target.target.url),
         "awsAccountNumber": target.target.aws_account_number,
         "status": target.status.value,
         "complete": target.complete,
         "inventoryComplete": target.inventory_complete,
+        "coverage": {
+            "pagesScanned": target.coverage.pages_scanned,
+            "pagesDiscovered": target.coverage.pages_discovered,
+            "pages": list(target.coverage.pages),
+            "crawlRequests": target.coverage.crawl_requests,
+            "httpRequests": target.coverage.http_requests,
+            "crawlComplete": target.coverage.crawl_complete,
+            "agentActions": target.coverage.agent_actions,
+            "agentComplete": target.coverage.agent_complete,
+        },
         "exposure": _exposure_document(target.exposure),
         "components": [_component_document(component) for component in target.components],
         "errors": list(target.errors),
@@ -77,8 +94,9 @@ def _target_document(target: TargetResult) -> dict[str, Any]:
 
 def run_document(run: ScanRun) -> dict[str, Any]:
     return {
-        "schemaVersion": "1.1",
+        "schemaVersion": "1.2",
         "runId": run.run_id,
+        "profile": run.profile,
         "startedAt": _timestamp(run.started_at),
         "completedAt": _timestamp(run.completed_at),
         "targets": [_target_document(target) for target in run.targets],

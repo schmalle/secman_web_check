@@ -2,7 +2,9 @@ from datetime import UTC, datetime
 
 import pytest
 
+from secman_web_check.agent import AgentOptions
 from secman_web_check.config import ScannerConfig
+from secman_web_check.crawler import CrawlOptions
 from secman_web_check.http import CollectionError, HttpRequest, HttpResponseEvidence
 from secman_web_check.models import Reachability, TargetResult, TargetStatus
 from secman_web_check.orchestrator import scan_all, scan_target
@@ -19,7 +21,7 @@ def test_batch_preserves_input_order_and_isolates_failure(monkeypatch):
         now = datetime.now(UTC)
         return TargetResult(target, TargetStatus.SUCCESS, started_at=now, completed_at=now)
 
-    monkeypatch.setattr("secman_web_check.orchestrator.scan_target", fake_scan)
+    monkeypatch.setattr("secman_web_check.orchestrator._bounded_scan_target", fake_scan)
     run = scan_all(targets, ScannerConfig(concurrency=2))
     assert [result.target.host for result in run.targets] == ["bad.example", "good.example"]
     assert [result.status for result in run.targets] == [TargetStatus.FAILED, TargetStatus.SUCCESS]
@@ -39,7 +41,7 @@ def test_progress_callback_reports_every_target_once_including_failures(monkeypa
         now = datetime.now(UTC)
         return TargetResult(target, TargetStatus.SUCCESS, started_at=now, completed_at=now)
 
-    monkeypatch.setattr("secman_web_check.orchestrator.scan_target", fake_scan)
+    monkeypatch.setattr("secman_web_check.orchestrator._bounded_scan_target", fake_scan)
     events = []
     run = scan_all(
         targets,
@@ -143,3 +145,104 @@ def test_failed_collection_has_unknown_reachability_and_no_body_length():
     assert result.status is TargetStatus.FAILED
     assert result.exposure.reachability is Reachability.UNKNOWN
     assert result.exposure.body_length is None
+
+
+def test_crawl_budget_marks_target_partial_and_inventory_incomplete():
+    class CrawlCollector:
+        def with_allowed_origins(self, _origins):
+            return self
+
+        def with_max_body_bytes(self, _limit):
+            return self
+
+        def with_max_redirects(self, _limit):
+            return self
+
+        def collect(self, target, method="GET", headers=None):
+            body = b'<a href="/one">one</a><a href="/two">two</a>'
+            if target.url.endswith("security.txt"):
+                return (
+                    HttpResponseEvidence(HttpRequest("GET", target.url), 404, (), b"", False, 0.01),
+                )
+            return (
+                HttpResponseEvidence(
+                    HttpRequest("GET", target.url),
+                    200,
+                    (("content-type", "text/html"),),
+                    body if target.url.endswith("/") else b"",
+                    False,
+                    0.01,
+                ),
+            )
+
+    result = scan_target(
+        normalize_target("https://example.com/"),
+        ScannerConfig(),
+        collector=CrawlCollector(),
+        tls_scanner=FakeTlsScanner(),
+        crawl_options=CrawlOptions(max_pages=2),
+    )
+
+    assert result.status is TargetStatus.PARTIAL
+    assert not result.complete
+    assert not result.inventory_complete
+    assert result.coverage.pages_scanned == 2
+    assert result.coverage.pages == ("https://example.com/", "https://example.com/one")
+
+
+def test_cross_origin_redirect_skips_optional_probes(monkeypatch):
+    class RedirectCollector:
+        def with_max_body_bytes(self, _limit):
+            return self
+
+        def collect(self, target, method="GET", headers=None):
+            url = (
+                target.url
+                if target.url.endswith("security.txt")
+                else "https://destination.example/"
+            )
+            return (HttpResponseEvidence(HttpRequest("GET", url), 200, (), b"", False, 0.01),)
+
+    def unexpected(*_args, **_kwargs):
+        raise AssertionError("optional probe crossed redirect boundary")
+
+    monkeypatch.setattr("secman_web_check.orchestrator.discover_paths", unexpected)
+    monkeypatch.setattr("secman_web_check.orchestrator.scan_with_external", unexpected)
+    monkeypatch.setattr("secman_web_check.orchestrator.run_agent", unexpected)
+    result = scan_target(
+        normalize_target("https://source.example/"),
+        ScannerConfig(active=True),
+        collector=RedirectCollector(),
+        tls_scanner=FakeTlsScanner(),
+        dirbuster=True,
+        external_scanners=("nuclei",),
+        agent_options=AgentOptions("test-key", "test-model"),
+    )
+
+    assert result.status is TargetStatus.PARTIAL
+    assert "Optional probes skipped after cross-origin redirect" in result.errors
+    assert not result.coverage.agent_complete
+
+
+def test_outer_target_deadline_terminates_worker_before_scan_can_stall():
+    from time import monotonic
+
+    from secman_web_check.orchestrator import _bounded_scan_target
+
+    started = monotonic()
+    result = _bounded_scan_target(
+        normalize_target("https://example.com"), ScannerConfig(target_timeout_seconds=0.001)
+    )
+    assert monotonic() - started < 3
+    assert result.status == TargetStatus.FAILED
+    assert not result.complete
+    assert result.errors == ("Target deadline exceeded",)
+
+
+def test_outer_target_worker_preserves_sanitized_denied_target_result():
+    from secman_web_check.orchestrator import _bounded_scan_target
+
+    result = _bounded_scan_target(normalize_target("http://127.0.0.1"), ScannerConfig())
+    assert result.status == TargetStatus.FAILED
+    assert not result.complete
+    assert "address was denied" in result.errors[0]

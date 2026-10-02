@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import ssl
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -144,7 +145,7 @@ def connect_database(settings: DatabaseSettings) -> Any:
     try:
         import pymysql  # type: ignore[import-untyped]
 
-        ssl = {"ca": settings.ssl_ca} if settings.ssl_ca else None
+        context = ssl.create_default_context(cafile=settings.ssl_ca)
         return pymysql.connect(
             host=settings.host,
             port=settings.port,
@@ -153,7 +154,7 @@ def connect_database(settings: DatabaseSettings) -> Any:
             database=settings.database,
             charset="utf8mb4",
             autocommit=False,
-            ssl=ssl,
+            ssl=context,
         )
     except Exception as error:
         raise StorageError("MariaDB connection failed") from error

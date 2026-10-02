@@ -16,6 +16,7 @@ ALLOWED_KEYS = frozenset(
         "SECMAN_URL",
         "SECMAN_SCANNER_ID",
         "SECMAN_SECURITY_SCANNER_ID",
+        "SECMAN_EXTENDED_SCANNER_ID",
         "SECMAN_VISUAL_SCANNER_ID",
         "SECMAN_TOKEN",
         "SECMAN_USERNAME",
@@ -23,6 +24,9 @@ ALLOWED_KEYS = frozenset(
         "SECMAN_VISION_API_KEY",
         "SECMAN_VISION_MODEL",
         "SECMAN_VISION_BASE_URL",
+        "SECMAN_AI_API_KEY",
+        "SECMAN_AI_MODEL",
+        "SECMAN_AI_BASE_URL",
     }
 )
 
