@@ -11,6 +11,7 @@ from ..models import (
     DetectedComponent,
     ExposureObservation,
     Finding,
+    JavaScriptAsset,
     ScanRun,
     TargetResult,
     public_url,
@@ -66,6 +67,16 @@ def _exposure_document(exposure: ExposureObservation | None) -> dict[str, Any] |
     }
 
 
+def _javascript_document(asset: JavaScriptAsset) -> dict[str, Any]:
+    return {
+        "url": asset.url,
+        "sha256": asset.sha256,
+        "sizeBytes": asset.size_bytes,
+        "statusCode": asset.status_code,
+        "truncated": asset.truncated,
+    }
+
+
 def _target_document(target: TargetResult) -> dict[str, Any]:
     return {
         "url": public_url(target.target.url),
@@ -85,6 +96,7 @@ def _target_document(target: TargetResult) -> dict[str, Any]:
         },
         "exposure": _exposure_document(target.exposure),
         "components": [_component_document(component) for component in target.components],
+        "javascriptAssets": [_javascript_document(asset) for asset in target.javascript_assets],
         "errors": list(target.errors),
         "startedAt": _timestamp(target.started_at),
         "completedAt": _timestamp(target.completed_at),

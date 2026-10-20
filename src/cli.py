@@ -8,6 +8,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Annotated, Any
 
+import httpx
 import typer
 from rich.console import Console
 from rich.markup import escape
@@ -38,6 +39,7 @@ from .secman import (
     targets_from_subjects,
 )
 from .storage import DatabaseSettings, MariaDbStore, StorageError, connect_database
+from .system_review import ReviewOptions, default_prompt_path, load_prompt, review_run
 from .targets import NormalizedTarget, TargetError, load_targets
 from .visual import VisualOptions, merge_runs, scan_visual_all
 
@@ -54,6 +56,7 @@ console = Console()
 error_console = Console(stderr=True)
 
 _FORMATS = {"terminal", "json", "sarif", "html"}
+_DEFAULT_REVIEW_PROMPT = default_prompt_path()
 _SEVERITY = {
     Severity.INFO: 0,
     Severity.LOW: 1,
@@ -336,6 +339,27 @@ def scan(
             help="Explicitly run a safe profile: nuclei or nikto (repeatable).",
         ),
     ] = None,
+    javascript_inventory: Annotated[
+        bool,
+        typer.Option(
+            "--javascript-inventory",
+            help="Fetch referenced JavaScript, retain SHA-256 and metadata, and discard bytes.",
+        ),
+    ] = False,
+    llm_review: Annotated[
+        bool,
+        typer.Option(
+            "--llm-review",
+            help="Explicitly send sanitized scan evidence to OpenRouter for system review.",
+        ),
+    ] = False,
+    llm_prompt: Annotated[
+        Path,
+        typer.Option(
+            "--llm-prompt",
+            help="UTF-8 system-prompt file used by the optional OpenRouter review.",
+        ),
+    ] = _DEFAULT_REVIEW_PROMPT,
     scan_mode: Annotated[
         str,
         typer.Option(
@@ -412,9 +436,11 @@ def scan(
         raise typer.BadParameter(
             f"--external-scanner must be nuclei or nikto, not {min(unknown_scanners)}"
         )
-    if (dirbuster or selected_scanners or crawl or ai_agent) and scan_mode == "visual":
+    if (
+        dirbuster or selected_scanners or crawl or ai_agent or javascript_inventory
+    ) and scan_mode == "visual":
         raise typer.BadParameter(
-            "discovery, external scanners and AI agent require a security scan"
+            "discovery, external scanners, AI agent and JavaScript inventory require a security scan"
         )
     if allowed_origins and not crawl and scan_mode == "security":
         raise typer.BadParameter("--allowed-origin requires --crawl or a visual scan")
@@ -443,6 +469,7 @@ def scan(
     threshold_name = fail_on.upper()
     if threshold_name != "NONE" and threshold_name not in Severity.__members__:
         raise typer.BadParameter("--fail-on must be info, low, medium, high, critical, or none")
+    review_options: ReviewOptions | None = None
     try:
         scan_config = load_config(
             config,
@@ -468,6 +495,16 @@ def scan(
                 _scanner_id("extended" if extended else "security", combined=scan_mode == "both")
             if scan_mode in {"visual", "both"}:
                 _scanner_id("visual", combined=scan_mode == "both")
+        if llm_review:
+            load_prompt(llm_prompt)
+            review_options = ReviewOptions(
+                prompt_path=llm_prompt,
+                api_key=os.environ.get("OPENROUTER_API_KEY", ""),
+                model=os.environ.get("SECMAN_OPENROUTER_MODEL", "anthropic/claude-sonnet-4.5"),
+                base_url=os.environ.get(
+                    "SECMAN_OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"
+                ),
+            )
         if targets_from_secman:
             source_mode = (
                 "visual" if scan_mode == "visual" else ("extended" if extended else "security")
@@ -511,6 +548,7 @@ def scan(
             if (
                 dirbuster
                 or selected_scanners
+                or javascript_inventory
                 or crawl_options is not None
                 or agent_options is not None
             ):
@@ -522,6 +560,7 @@ def scan(
                     external_scanners=selected_scanners,
                     crawl_options=crawl_options,
                     agent_options=agent_options,
+                    javascript=javascript_inventory,
                 )
             else:
                 security_run = scan_all(targets, scan_config, progress=security_progress)
@@ -551,6 +590,15 @@ def scan(
         run = security_run or visual_run
     if run is None:  # pragma: no cover - guarded by scan_mode validation
         raise typer.Exit(2)
+    if llm_review:
+        try:
+            if review_options is None:  # pragma: no cover - initialized with llm_review
+                raise RuntimeError("system review configuration is unavailable")
+            error_console.print("[dim]Reviewing sanitized evidence with OpenRouter…[/dim]")
+            run = review_run(run, review_options)
+        except (httpx.HTTPError, OSError, RuntimeError, TypeError, ValueError) as error:
+            error_console.print(f"[red]Operational error:[/red] {error}")
+            raise typer.Exit(2) from error
     operational_failure = any(
         result.status in {TargetStatus.PARTIAL, TargetStatus.FAILED} for result in run.targets
     )

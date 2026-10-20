@@ -53,6 +53,25 @@ Crawl limits are CLI options: `--max-pages` (50), `--max-depth` (2), and
 additional origins for crawling or visual resources. These options do not change the
 default non-crawling scan.
 
+OpenRouter system-review environment variables:
+
+- `OPENROUTER_API_KEY`: required only with `--llm-review`.
+- `SECMAN_OPENROUTER_MODEL`: optional model slug (default
+  `anthropic/claude-sonnet-4.5`).
+- `SECMAN_OPENROUTER_BASE_URL`: optional public HTTPS API base URL (default
+  `https://openrouter.ai/api/v1`).
+
+The review system prompt is loaded from the packaged
+`src/prompts/system-review.txt`. Pass `--llm-prompt PATH` to use a user-modified UTF-8
+prompt. The distribution also includes focused `src/prompts/aws-security-review.txt` and
+`src/prompts/secrets-security-review.txt` templates. The default prompt covers supported
+AWS and secret-exposure indicators; the focused templates provide stricter review scopes.
+An empty or unreadable prompt aborts before scanning. The model receives only
+sanitized result metadata, component evidence, deterministic findings, stage errors,
+the optional AWS account binding, and JavaScript checksums—not raw HTTP or JavaScript
+response bodies. Both
+`--llm-review` and `--javascript-inventory` are explicit, independent opt-ins.
+
 Load secrets from a secret manager into the process environment. Do not commit a filled
 `.env` file or pass secrets as shell arguments.
 

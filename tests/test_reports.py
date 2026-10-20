@@ -9,6 +9,7 @@ from secman_web_check.models import (
     DetectedComponent,
     ExposureObservation,
     Finding,
+    JavaScriptAsset,
     Reachability,
     ScanRun,
     Severity,
@@ -43,6 +44,7 @@ def sample_run():
         TargetStatus.SUCCESS,
         (finding,),
         components=(component,),
+        javascript_assets=(JavaScriptAsset("https://example.com/app.js", "a" * 64, 1234, 200),),
         exposure=ExposureObservation(
             target.url, target.url, Reachability.REACHABLE, 200, 0, body_length=512
         ),
@@ -69,9 +71,11 @@ def test_reports_share_finding_identity_and_html_escapes(tmp_path):
     assert json_report["schemaVersion"] == "1.2"
     assert json_report["targets"][0]["awsAccountNumber"] == "111122223333"
     assert json_report["targets"][0]["components"][0]["name"] == "jQuery"
+    assert json_report["targets"][0]["javascriptAssets"][0]["sha256"] == "a" * 64
     assert json_report["targets"][0]["exposure"]["reachability"] == "REACHABLE"
     assert json_report["targets"][0]["exposure"]["bodyLength"] == 512
     assert "512 bytes" in html
+    assert "https://example.com/app.js" in html
     assert json.loads(sarif_path.read_text())["version"] == "2.1.0"
 
 
@@ -83,3 +87,4 @@ def test_terminal_report_renders_without_raw_response_body():
     assert "jQuery" in output
     assert "REACHABLE" in output
     assert "512 bytes" in output
+    assert "https://example.com/app.js" in output
