@@ -12,6 +12,7 @@ from typing import Any
 
 from .components import sanitize_inventory_url
 from .models import ScanRun
+from .reports.json_report import run_document
 
 
 class StorageError(RuntimeError):
@@ -138,7 +139,16 @@ ALTER TABLE scan_target
   ADD COLUMN IF NOT EXISTS body_length INT UNSIGNED NULL
 """.strip()
 
-_MIGRATIONS = ((1, _MIGRATION_V1), (2, _MIGRATION_V2), (3, _MIGRATION_V3))
+_MIGRATION_V4 = """
+CREATE TABLE IF NOT EXISTS scan_archive (
+  run_id CHAR(36) PRIMARY KEY,
+  schema_version VARCHAR(16) NOT NULL,
+  report_json LONGTEXT NOT NULL,
+  CONSTRAINT fk_scan_archive_run FOREIGN KEY (run_id) REFERENCES scan_run(run_id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+""".strip()
+
+_MIGRATIONS = ((1, _MIGRATION_V1), (2, _MIGRATION_V2), (3, _MIGRATION_V3), (4, _MIGRATION_V4))
 
 
 def connect_database(settings: DatabaseSettings) -> Any:
@@ -214,6 +224,10 @@ class MariaDbStore:
             cursor.close()
 
     def save(self, run: ScanRun) -> None:
+        document = run_document(run)
+        archive = json.dumps(document, ensure_ascii=False, sort_keys=True)
+        if len(archive.encode()) > 20_000_000:
+            raise StorageError("scan archive exceeds 20 MB")
         cursor = self.connection.cursor()
         try:
             cursor.execute(
@@ -283,10 +297,35 @@ class MariaDbStore:
                             component.source_url,
                         ),
                     )
+            cursor.execute(
+                "INSERT INTO scan_archive (run_id, schema_version, report_json) VALUES (%s, %s, %s)",
+                (run.run_id, document["schemaVersion"], archive),
+            )
             self.connection.commit()
         except Exception as error:
             self.connection.rollback()
             raise StorageError("MariaDB scan persistence failed") from error
+        finally:
+            cursor.close()
+
+    def export(self, run_id: str) -> dict[str, Any]:
+        cursor = self.connection.cursor()
+        try:
+            cursor.execute("SELECT report_json FROM scan_archive WHERE run_id = %s", (run_id,))
+            row = cursor.fetchone()
+            if not row:
+                raise StorageError("run has no full archive; older runs are summary-only")
+            raw = row[0] if not isinstance(row, dict) else row["report_json"]
+            if len(raw.encode()) > 20_000_000:
+                raise StorageError("scan archive exceeds 20 MB")
+            result = json.loads(raw)
+            if not isinstance(result, dict):
+                raise StorageError("invalid scan archive")
+            return result
+        except StorageError:
+            raise
+        except Exception as error:
+            raise StorageError("scan archive export failed") from error
         finally:
             cursor.close()
 

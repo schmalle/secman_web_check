@@ -7,6 +7,7 @@ import os
 from dataclasses import replace
 from pathlib import Path
 from typing import Annotated, Any
+from urllib.parse import urlsplit
 
 import httpx
 import typer
@@ -23,33 +24,42 @@ from rich.progress import (
 from rich.table import Table
 
 from .agent import AgentOptions
+from .api_inventory import openapi_inventory
+from .browser_discovery import BrowserDiscoveryOptions
 from .config import load_config
 from .crawler import CrawlOptions, allowed_origin, openapi_get_paths
+from .evaluation import evaluate
+from .external_profile import load_external_profile
 from .external_scanners import SUPPORTED_SCANNERS
+from .intelligence import load_snapshot, update_snapshot
 from .models import ScanRun, Severity, TargetResult, TargetStatus, public_url
 from .orchestrator import scan_all
 from .reports import render_terminal, write_html, write_json, write_sarif
+from .reports.common import atomic_write
 from .reports.compare import compare_reports
 from .secman import (
     AmbiguousSubject,
     IntegrationClient,
     SecmanIntegrationError,
-    build_run_body,
-    match_subject,
     targets_from_subjects,
 )
 from .storage import DatabaseSettings, MariaDbStore, StorageError, connect_database
 from .system_review import ReviewOptions, default_prompt_path, load_prompt, review_run
 from .targets import NormalizedTarget, TargetError, load_targets
+from .traffic import traffic_run
 from .visual import VisualOptions, merge_runs, scan_visual_all
 
 app = typer.Typer(
     name="secman-web-check",
     help="Authorized, bounded web-security scanning for explicit targets.",
     no_args_is_help=True,
+    rich_help_panel=None,
+    context_settings={"max_content_width": 120},
 )
 db_app = typer.Typer(help="Manage optional MariaDB scan history.")
 history_app = typer.Typer(help="Inspect optional MariaDB scan history.")
+intel_app = typer.Typer(help="Explicit maintained advisory snapshot updates.")
+app.add_typer(intel_app, name="intel")
 app.add_typer(db_app, name="db")
 app.add_typer(history_app, name="history")
 console = Console()
@@ -151,78 +161,59 @@ def _targets_from_secman(scanner_id: int) -> tuple[NormalizedTarget, ...]:
 
 
 def _push_to_secman(
-    run: ScanRun, *, active: bool, scanner_id: int, mode: str, terminal_coverage: bool = True
+    run: ScanRun, *, active: bool, scanner_id: int, mode: str, terminal_coverage: bool = True,
+    deferred: bool = False,
 ) -> None:
-    terminal_coverage = terminal_coverage and mode != "visual"
-    with _integration_client() as client:
-        subjects = client.list_subjects(scanner_id)
-        subjects_by_id = {subject.id: subject for subject in subjects}
-        failed_hosts: list[str] = []
-        for result in run.targets:
-            try:
-                subject = None
-                if result.target.secman_subject_id is not None:
-                    candidate = subjects_by_id.get(result.target.secman_subject_id)
-                    if (
-                        candidate is not None
-                        and candidate.asset_id == result.target.secman_asset_id
-                    ):
-                        subject = candidate
-                    elif result.target.secman_asset_id is not None:
-                        asset_matches = [
-                            item
-                            for item in subjects
-                            if item.asset_id == result.target.secman_asset_id
-                        ]
-                        if len(asset_matches) == 1:
-                            subject = asset_matches[0]
-                        elif len(asset_matches) > 1:
-                            raise SecmanIntegrationError(
-                                "multiple SecMan subjects match the bound asset"
-                            )
-                else:
-                    subject = match_subject(
-                        subjects,
-                        result.target.url,
-                        aws_account_number=result.target.aws_account_number,
-                    )
-                if subject is None:
-                    message = (
-                        "SecMan target binding changed during the scan"
-                        if result.target.secman_subject_id is not None
-                        else "no authorized subject matched"
-                    )
-                    raise SecmanIntegrationError(message)
-                body = build_run_body(
-                    scanner_id,
-                    subject,
-                    result
-                    if terminal_coverage
-                    else replace(result, complete=False, inventory_complete=False),
-                    metadata={
-                        "scannerVersion": "0.3.0",
-                        "scanMode": mode,
-                        "profile": run.profile,
-                        "securityMode": "active" if active else "passive",
-                        "awsAccountNumber": result.target.aws_account_number,
-                        "coverage": {
-                            "pagesScanned": result.coverage.pages_scanned,
-                            "pagesDiscovered": result.coverage.pages_discovered,
-                            "crawlRequests": result.coverage.crawl_requests,
-                            "httpRequests": result.coverage.http_requests,
-                            "crawlComplete": result.coverage.crawl_complete,
-                            "agentActions": result.coverage.agent_actions,
-                            "agentComplete": result.coverage.agent_complete,
-                        },
-                    },
-                )
-                client.submit_run(body)
-            except (AmbiguousSubject, SecmanIntegrationError):
-                failed_hosts.append(result.target.host)
-        if failed_hosts:
-            raise SecmanIntegrationError(
-                "SecMan upload failed for: " + ", ".join(sorted(set(failed_hosts)))
+    from .delivery import enqueue, queue_path, synchronize
+    from .integration_outbox import Outbox
+    from .reports.json_report import run_document
+
+    keys = enqueue(run_document(run), scanner_id, mode if not active else "security-extended",
+                   allow_resolution=terminal_coverage and not active)
+    if deferred:
+        error_console.print("SecMan delivery queued; use delivery status/retry to synchronize.")
+        return
+    queue = Outbox(queue_path())
+    try:
+        rows = synchronize(queue, _integration_client)
+        if any(row['state'] != 'delivered' for row in rows if row['id'] in keys):
+            raise SecmanIntegrationError("SecMan delivery pending or blocked; inspect delivery status")
+    finally:
+        queue.close()
+
+
+def _reviewed_snapshot(original: ScanRun, reviewed: ScanRun) -> ScanRun:
+    by_url = {public_url(item.target.url): item for item in reviewed.targets}
+    targets = []
+    for target in original.targets:
+        enriched = by_url[public_url(target.target.url)]
+        additions = tuple(
+            item for item in enriched.findings if item.engine == "secman-web-check-openrouter"
+        )
+        review_stages = tuple(
+            stage for stage in enriched.analysis_stages if stage.name == "system-review"
+        )
+        review_failed = any(stage.state in {"failed", "cancelled"} for stage in review_stages)
+        targets.append(
+            replace(
+                target,
+                findings=(*target.findings, *additions),
+                analysis_stages=(*target.analysis_stages, *review_stages),
+                complete=False,
+                status=TargetStatus.PARTIAL if review_failed else target.status,
+                errors=(*target.errors, "System review failed; scan evidence retained")
+                if review_failed
+                else target.errors,
+                completed_at=enriched.completed_at,
             )
+        )
+    return replace(
+        original,
+        targets=tuple(targets),
+        manifest_json=reviewed.manifest_json,
+        completed_at=reviewed.completed_at,
+        profile=original.profile + ",review",
+    )
 
 
 def _scanner_id(mode: str, *, combined: bool) -> int:
@@ -308,7 +299,10 @@ def scan(
     ] = False,
     allowed_origins: Annotated[
         list[str] | None,
-        typer.Option("--allowed-origin", help="Additional HTTP(S) origin allowed during crawling."),
+        typer.Option(
+            "--allowed-origin",
+            help="Additional HTTP(S) origin allowed for crawling, script inventory or browser resources.",
+        ),
     ] = None,
     max_pages: Annotated[
         int,
@@ -395,6 +389,60 @@ def scan(
             help="Allow authorized RFC1918/ULA targets; loopback and link-local remain denied.",
         ),
     ] = False,
+    external_profile_path: Annotated[
+        Path | None,
+        typer.Option(
+            "--external-profile",
+            rich_help_panel="External engines",
+            help="Reviewed external binary/template manifest.",
+        ),
+    ] = None,
+    external_profile_sha256: Annotated[
+        str | None,
+        typer.Option(
+            "--external-profile-sha256",
+            rich_help_panel="External engines",
+            help="Trusted external manifest SHA-256.",
+        ),
+    ] = None,
+    tls_vulnerabilities: Annotated[
+        bool,
+        typer.Option(
+            "--tls-vulnerabilities",
+            help="Opt in to TLS vulnerability probes beyond certificate/protocol inventory.",
+        ),
+    ] = False,
+    browser_discovery: Annotated[
+        bool,
+        typer.Option(
+            "--browser-discovery", help="Discover rendered links and read-only browser API traffic."
+        ),
+    ] = False,
+    advisory_db: Annotated[
+        Path | None, typer.Option("--advisory-db", help="Offline maintained OSV snapshot.")
+    ] = None,
+    advisory_sha256: Annotated[
+        str | None,
+        typer.Option("--advisory-sha256", help="Trusted SHA-256 of the advisory snapshot."),
+    ] = None,
+    requests_per_second: Annotated[
+        float | None,
+        typer.Option("--requests-per-second", rich_help_panel="Traffic limits", min=0.01),
+    ] = None,
+    global_requests_per_second: Annotated[
+        float | None,
+        typer.Option("--global-requests-per-second", rich_help_panel="Traffic limits", min=0.01),
+    ] = None,
+    per_origin_concurrency: Annotated[
+        int | None,
+        typer.Option("--per-origin-concurrency", rich_help_panel="Traffic limits", min=1),
+    ] = None,
+    max_operations: Annotated[
+        int | None, typer.Option("--max-operations", rich_help_panel="Traffic limits", min=1)
+    ] = None,
+    max_provider_calls: Annotated[
+        int | None, typer.Option("--max-provider-calls", rich_help_panel="Traffic limits", min=1)
+    ] = None,
     store_db: Annotated[
         bool,
         typer.Option("--store-db", help="Persist this run to explicitly configured MariaDB."),
@@ -405,6 +453,7 @@ def scan(
             "--push-to-secman", help="Submit atomic target snapshots through SecMan REST v1."
         ),
     ] = False,
+    defer_secman: Annotated[bool, typer.Option("--defer-secman", help="Queue upload without contacting SecMan.")] = False,
     fail_on: Annotated[
         str,
         typer.Option(
@@ -427,6 +476,8 @@ def scan(
         raise typer.BadParameter(
             "provide exactly one target, --targets-file, --targets-csv, or --targets-from-secman"
         )
+    if defer_secman and not push_to_secman:
+        raise typer.BadParameter("--defer-secman requires --push-to-secman")
     scan_mode = scan_mode.lower()
     if scan_mode not in {"security", "visual", "both"}:
         raise typer.BadParameter("--scan-mode must be security, visual, or both")
@@ -437,13 +488,28 @@ def scan(
             f"--external-scanner must be nuclei or nikto, not {min(unknown_scanners)}"
         )
     if (
-        dirbuster or selected_scanners or crawl or ai_agent or javascript_inventory
+        dirbuster
+        or selected_scanners
+        or crawl
+        or ai_agent
+        or javascript_inventory
+        or browser_discovery
+        or tls_vulnerabilities
+        or advisory_db
     ) and scan_mode == "visual":
         raise typer.BadParameter(
             "discovery, external scanners, AI agent and JavaScript inventory require a security scan"
         )
-    if allowed_origins and not crawl and scan_mode == "security":
-        raise typer.BadParameter("--allowed-origin requires --crawl or a visual scan")
+    if (
+        allowed_origins
+        and not crawl
+        and not browser_discovery
+        and not javascript_inventory
+        and scan_mode == "security"
+    ):
+        raise typer.BadParameter(
+            "--allowed-origin requires crawl, script inventory, browser discovery or visual mode"
+        )
     if api_spec is not None and not crawl:
         raise typer.BadParameter("--api-spec requires --crawl")
     try:
@@ -475,6 +541,12 @@ def scan(
             config,
             os.environ,
             concurrency=concurrency,
+            tls_vulnerabilities=True if tls_vulnerabilities else None,
+            requests_per_second=requests_per_second,
+            global_requests_per_second=global_requests_per_second,
+            per_origin_concurrency=per_origin_concurrency,
+            max_operations=max_operations,
+            max_provider_calls=max_provider_calls,
             active=True if active else None,
             allow_private_targets=True if allow_private_targets else None,
         )
@@ -489,7 +561,41 @@ def scan(
             if ai_agent
             else None
         )
-        extended = bool(scan_config.active or dirbuster or selected_scanners or crawl or ai_agent)
+        if selected_scanners and not (external_profile_path and external_profile_sha256):
+            raise ValueError(
+                "External scanners require --external-profile and --external-profile-sha256"
+            )
+        reviewed_profile = (
+            load_external_profile(external_profile_path, external_profile_sha256)
+            if external_profile_path and external_profile_sha256
+            else None
+        )
+        if bool(advisory_db) != bool(advisory_sha256):
+            raise ValueError("--advisory-db and --advisory-sha256 must be supplied together")
+        snapshot = (
+            load_snapshot(advisory_db, advisory_sha256) if advisory_db and advisory_sha256 else None
+        )
+        declared_operations = openapi_inventory(api_spec) if api_spec else ()
+        browser_options = (
+            BrowserDiscoveryOptions(
+                frozenset(allowed_origin(value) for value in allowed_origins or ()),
+                max_pages,
+                max_depth,
+            )
+            if browser_discovery
+            else None
+        )
+        extended = bool(
+            scan_config.active
+            or scan_config.tls_vulnerabilities
+            or dirbuster
+            or selected_scanners
+            or crawl
+            or ai_agent
+            or javascript_inventory
+            or llm_review
+            or browser_discovery
+        )
         if push_to_secman:
             if scan_mode in {"security", "both"}:
                 _scanner_id("extended" if extended else "security", combined=scan_mode == "both")
@@ -520,6 +626,12 @@ def scan(
         raise typer.BadParameter(str(error)) from error
     if not targets:
         raise typer.BadParameter("no usable targets were supplied")
+    if selected_scanners and any(
+        item.url != public_url(item.url) or urlsplit(item.url).path != "/" for item in targets
+    ):
+        raise typer.BadParameter(
+            "External scanners require explicit origin-root targets without queries"
+        )
 
     visual_options = None
     if scan_mode in {"visual", "both"}:
@@ -536,120 +648,142 @@ def scan(
         except ValueError as error:
             raise typer.BadParameter(str(error)) from error
 
-    security_run: ScanRun | None = None
-    if scan_mode in {"security", "both"}:
-        security_progress = _ScanProgress(
-            "Security scan",
-            len(targets),
-            f"concurrency {scan_config.concurrency}, "
-            f"{'active' if scan_config.active else 'passive'} mode",
-        )
-        try:
-            if (
-                dirbuster
-                or selected_scanners
-                or javascript_inventory
-                or crawl_options is not None
-                or agent_options is not None
-            ):
-                security_run = scan_all(
-                    targets,
-                    scan_config,
-                    progress=security_progress,
-                    dirbuster=dirbuster,
-                    external_scanners=selected_scanners,
-                    crawl_options=crawl_options,
-                    agent_options=agent_options,
-                    javascript=javascript_inventory,
-                )
-            else:
-                security_run = scan_all(targets, scan_config, progress=security_progress)
-        finally:
-            security_progress.close()
-    visual_run: ScanRun | None = None
-    if visual_options is not None:
-        visual_progress = _ScanProgress(
-            "Visual scan",
-            len(targets),
-            f"concurrency {scan_config.concurrency}, "
-            f"vision analysis {'on' if visual_options.analyze else 'off'}",
-        )
-        try:
-            visual_run = scan_visual_all(
-                targets, scan_config, visual_options, progress=visual_progress
+    with traffic_run(scan_config) as traffic:
+        security_run: ScanRun | None = None
+        if scan_mode in {"security", "both"}:
+            security_progress = _ScanProgress(
+                "Security scan",
+                len(targets),
+                f"concurrency {scan_config.concurrency}, "
+                f"{'active' if scan_config.active else 'passive'} mode",
             )
-        except (OSError, RuntimeError, ValueError) as error:
-            error_console.print(f"[red]Operational error:[/red] {error}")
-            raise typer.Exit(2) from error
-        finally:
-            visual_progress.close()
-    run: ScanRun | None
-    if security_run is not None and visual_run is not None:
-        run = merge_runs(security_run, visual_run)
-    else:
-        run = security_run or visual_run
-    if run is None:  # pragma: no cover - guarded by scan_mode validation
-        raise typer.Exit(2)
-    if llm_review:
-        try:
-            if review_options is None:  # pragma: no cover - initialized with llm_review
-                raise RuntimeError("system review configuration is unavailable")
-            error_console.print("[dim]Reviewing sanitized evidence with OpenRouter…[/dim]")
-            run = review_run(run, review_options)
-        except (httpx.HTTPError, OSError, RuntimeError, TypeError, ValueError) as error:
-            error_console.print(f"[red]Operational error:[/red] {error}")
-            raise typer.Exit(2) from error
-    operational_failure = any(
-        result.status in {TargetStatus.PARTIAL, TargetStatus.FAILED} for result in run.targets
-    )
-    try:
-        _write_reports(run, requested, output_dir)
-        if store_db:
-            error_console.print("[dim]Storing run in MariaDB…[/dim]")
-            store, connection = _database()
             try:
-                store.save(run)
+                if (
+                    browser_options is not None
+                    or snapshot is not None
+                    or dirbuster
+                    or selected_scanners
+                    or javascript_inventory
+                    or crawl_options is not None
+                    or agent_options is not None
+                ):
+                    security_run = scan_all(
+                        targets,
+                        scan_config,
+                        progress=security_progress,
+                        dirbuster=dirbuster,
+                        external_scanners=selected_scanners,
+                        external_profile=reviewed_profile,
+                        crawl_options=crawl_options,
+                        agent_options=agent_options,
+                        javascript=javascript_inventory,
+                        script_origins=frozenset(
+                            allowed_origin(value) for value in allowed_origins or ()
+                        ),
+                        traffic=traffic,
+                        browser_options=browser_options,
+                        api_operations=declared_operations,
+                        advisory_snapshot=snapshot,
+                    )
+                else:
+                    security_run = scan_all(
+                        targets, scan_config, progress=security_progress, traffic=traffic
+                    )
             finally:
-                connection.close()
-        if push_to_secman:
-            combined = scan_mode == "both"
-            if security_run is not None:
-                error_console.print(
-                    f"[dim]Pushing {len(security_run.targets)} security "
-                    "snapshot(s) to SecMan…[/dim]"
+                security_progress.close()
+        visual_run: ScanRun | None = None
+        if visual_options is not None:
+            visual_progress = _ScanProgress(
+                "Visual scan",
+                len(targets),
+                f"concurrency {scan_config.concurrency}, "
+                f"vision analysis {'on' if visual_options.analyze else 'off'}",
+            )
+            try:
+                visual_run = scan_visual_all(
+                    targets, scan_config, visual_options, progress=visual_progress, traffic=traffic
                 )
-                _push_to_secman(
-                    security_run,
-                    active=scan_config.active,
-                    scanner_id=_scanner_id(
-                        "extended" if extended else "security", combined=combined
-                    ),
-                    mode="security-extended" if extended else "security",
-                    **({"terminal_coverage": False} if extended else {}),
-                )
-            if visual_run is not None:
-                error_console.print(
-                    f"[dim]Pushing {len(visual_run.targets)} visual snapshot(s) to SecMan…[/dim]"
-                )
-                _push_to_secman(
-                    visual_run,
-                    active=False,
-                    scanner_id=_scanner_id("visual", combined=combined),
-                    mode="visual",
-                )
-    except (AmbiguousSubject, OSError, SecmanIntegrationError, StorageError, ValueError) as error:
-        error_console.print(f"[red]Operational error:[/red] {error}")
-        raise typer.Exit(2) from error
-    if operational_failure:
-        raise typer.Exit(2)
-    if threshold_name != "NONE":
-        threshold = _SEVERITY[Severity[threshold_name]]
-        if any(
-            _SEVERITY[finding.severity] >= threshold
-            for result in run.targets
-            for finding in result.findings
-        ):
-            raise typer.Exit(1)
+            except (OSError, RuntimeError, ValueError) as error:
+                error_console.print(f"[red]Operational error:[/red] {error}")
+                raise typer.Exit(2) from error
+            finally:
+                visual_progress.close()
+        run: ScanRun | None
+        if security_run is not None and visual_run is not None:
+            run = merge_runs(security_run, visual_run)
+        else:
+            run = security_run or visual_run
+        if run is None:  # pragma: no cover - guarded by scan_mode validation
+            raise typer.Exit(2)
+        if llm_review:
+            _write_reports(run, requested, output_dir)
+            try:
+                if review_options is None:  # pragma: no cover - initialized with llm_review
+                    raise RuntimeError("system review configuration is unavailable")
+                error_console.print("[dim]Reviewing sanitized evidence with OpenRouter…[/dim]")
+                run = review_run(run, review_options, traffic=traffic)
+                if security_run is not None:
+                    security_run = _reviewed_snapshot(security_run, run)
+                elif visual_run is not None:
+                    visual_run = _reviewed_snapshot(visual_run, run)
+            except (httpx.HTTPError, OSError, RuntimeError, TypeError, ValueError) as error:
+                error_console.print(f"[red]Operational error:[/red] {error}")
+                raise typer.Exit(2) from error
+        run = replace(run, metrics_json=json.dumps(traffic.metrics(), sort_keys=True))
+        operational_failure = any(
+            result.status in {TargetStatus.PARTIAL, TargetStatus.FAILED} for result in run.targets
+        )
+        try:
+            _write_reports(run, requested, output_dir)
+            if push_to_secman:
+                _write_reports(run, ("json",), output_dir)
+            if security_run is not None and visual_run is not None and (push_to_secman or "json" in requested):
+                write_json(security_run, output_dir / f"{run.run_id}-security.json")
+                write_json(visual_run, output_dir / f"{run.run_id}-visual.json")
+            if store_db and not traffic.cancelled:
+                error_console.print("[dim]Storing run in MariaDB…[/dim]")
+                try:
+                    store, connection = _database()
+                    try:
+                        store.save(run)
+                    finally:
+                        connection.close()
+                except (StorageError, OSError, ValueError):
+                    operational_failure = True
+                    error_console.print("MariaDB persistence failed; local report retained.")
+            if push_to_secman and not traffic.cancelled:
+                combined = scan_mode == "both"
+                for scan_snapshot, mode in ((security_run, "security-extended" if extended else "security"), (visual_run, "visual")):
+                    if scan_snapshot is None:
+                        continue
+                    try:
+                        _push_to_secman(
+                            scan_snapshot, active=scan_config.active if mode != "visual" else False,
+                            scanner_id=_scanner_id("extended" if mode == "security-extended" else mode, combined=combined),
+                            mode=mode, terminal_coverage=mode == "security", deferred=defer_secman,
+                        )
+                    except (SecmanIntegrationError, OSError, ValueError):
+                        operational_failure = True
+                        error_console.print(f"{mode} synchronization failed; report/queue retained. Use delivery status.")
+        except (
+            AmbiguousSubject,
+            OSError,
+            SecmanIntegrationError,
+            StorageError,
+            ValueError,
+        ) as error:
+            error_console.print(f"[red]Operational error:[/red] {error}")
+            raise typer.Exit(2) from error
+        if operational_failure:
+            raise typer.Exit(2)
+        if threshold_name != "NONE":
+            threshold = _SEVERITY[Severity[threshold_name]]
+            if any(
+                _SEVERITY[finding.severity] >= threshold
+                for result in run.targets
+                for finding in result.findings
+            ):
+                raise typer.Exit(1)
 
 
 @app.command()
@@ -734,6 +868,107 @@ def history_list(
             str(run.component_count),
         )
     console.print(table)
+
+
+@app.command("evaluate")
+def evaluate_command(
+    corpus: Annotated[Path, typer.Argument(help="Synthetic vulnerable/safe response corpus JSON.")],
+    output: Annotated[Path, typer.Option("--output", help="Detection measurements JSON.")],
+) -> None:
+    """Measure class-level precision/recall without any target requests."""
+    try:
+        result = evaluate(corpus)
+        atomic_write(output, json.dumps(result, indent=2, sort_keys=True) + "\n")
+    except (OSError, TypeError, ValueError) as error:
+        raise typer.BadParameter(str(error)) from error
+    console.print(f"Measurements: {output}")
+    if not result["passed"]:
+        raise typer.Exit(1)
+
+
+@intel_app.command("update")
+def intel_update(
+    output: Annotated[Path, typer.Option("--output", help="Normalized offline snapshot path.")],
+    advisory: Annotated[
+        list[str] | None, typer.Option("--advisory", help="OSV advisory ID, repeatable.")
+    ] = None,
+    package: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--package", help="Supported npm package, repeatable; discovers new advisories."
+        ),
+    ] = None,
+) -> None:
+    """Explicitly fetch selected public OSV records; no target inventory is transmitted."""
+    try:
+        digest = update_snapshot(tuple(advisory or ()), output, packages=tuple(package or ()))
+    except (httpx.HTTPError, OSError, RuntimeError, TypeError, ValueError) as error:
+        error_console.print(f"[red]Advisory update failed:[/red] {error}")
+        raise typer.Exit(2) from error
+    console.print(f"Snapshot: {output}\nSHA-256: {digest}")
+
+
+@history_app.command("export")
+def history_export(
+    run_id: Annotated[str, typer.Argument(help="Stored run UUID.")],
+    output: Annotated[Path, typer.Option("--output", help="Destination JSON file.")],
+) -> None:
+    """Export a full archived JSON report; older summary-only runs fail explicitly."""
+    try:
+        store, connection = _database()
+        try:
+            document = store.export(run_id)
+        finally:
+            connection.close()
+        atomic_write(output, json.dumps(document, indent=2, ensure_ascii=False) + "\n")
+    except (OSError, StorageError, ValueError) as error:
+        error_console.print(f"[red]Export failed:[/red] {error}")
+        raise typer.Exit(2) from error
+    console.print(f"JSON report: {output}")
+
+
+
+
+@app.command("delivery")
+def delivery_command(
+    action: Annotated[str, typer.Argument(help="status, retry, upload, or quarantine")],
+    report: Annotated[Path | None, typer.Option("--report")] = None,
+    scanner_id: Annotated[int | None, typer.Option("--scanner-id")] = None,
+    mode: Annotated[str, typer.Option("--mode")] = "security",
+    defer: Annotated[bool, typer.Option("--defer")] = False,
+    resume_blocked: Annotated[bool, typer.Option("--resume-blocked")] = False,
+    delivery_id: Annotated[str | None, typer.Option("--delivery-id")] = None,
+) -> None:
+    """Upload a saved JSON report or recover durable deliveries without rescanning."""
+    from .delivery import enqueue, queue_path, synchronize
+    from .integration_outbox import DeliveryError, Outbox
+
+    if action not in {"status", "retry", "upload", "quarantine"} or mode not in {"security", "security-extended", "visual"}:
+        raise typer.BadParameter("Choose status/retry/upload/quarantine and a supported mode")
+    try:
+        if action == "upload":
+            if report is None or scanner_id is None or report.stat().st_size > 16 * 1024 * 1024:
+                raise ValueError("A bounded JSON report and scanner ID are required")
+            enqueue(json.loads(report.read_text()), scanner_id, mode)
+        queue = Outbox(queue_path())
+        try:
+            if action == "quarantine":
+                if not delivery_id:
+                    raise ValueError("--delivery-id is required")
+                queue.quarantine(delivery_id)
+                rows = queue.status()
+            elif action != "status" and not defer:
+                rows = synchronize(queue, _integration_client, resume=resume_blocked)
+            else:
+                rows = queue.status()
+        finally:
+            queue.close()
+        typer.echo(json.dumps(rows))
+        if action in {"retry", "upload"} and not defer and any(row['state'] not in {'delivered', 'quarantined'} for row in rows):
+            raise typer.Exit(2)
+    except (DeliveryError, ValueError, OSError):
+        error_console.print("Delivery failed; inspect retained queue and configuration.")
+        raise typer.Exit(2) from None
 
 
 if __name__ == "__main__":

@@ -68,7 +68,7 @@ def test_reports_share_finding_identity_and_html_escapes(tmp_path):
     assert "&lt;script&gt;alert(1)&lt;/script&gt;" in html
     assert "default-src 'none'" in html
     json_report = json.loads(json_path.read_text())
-    assert json_report["schemaVersion"] == "1.2"
+    assert json_report["schemaVersion"] == "1.3"
     assert json_report["targets"][0]["awsAccountNumber"] == "111122223333"
     assert json_report["targets"][0]["components"][0]["name"] == "jQuery"
     assert json_report["targets"][0]["javascriptAssets"][0]["sha256"] == "a" * 64

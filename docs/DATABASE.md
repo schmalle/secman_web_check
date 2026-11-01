@@ -21,3 +21,20 @@ All database connections require TLS with certificate and hostname verification.
 roots are used by default; set `SECMAN_WEB_CHECK_DB_SSL_CA` for a private CA. Servers without
 TLS support and untrusted certificates fail before authentication; plaintext fallback is disabled. The
 scanner never prints or persists the database password.
+
+
+## Schema 4: full JSON archives
+
+Migration `004_scan_archive.sql` adds `scan_archive`, linked to `scan_run` with cascading
+deletion. A save inserts normalized summaries and a full schema 1.3 JSON document in one
+transaction. Archive failure rolls back all rows. Run `db install` before saving with
+this implementation. Existing migration checksums are unchanged.
+
+`history export RUN_ID --output report.json` exports the full archived record, including
+coverage, API/script inventory, evidence IDs and model/prompt/policy attribution. Older
+runs without archives fail explicitly as summary-only; missing fields are never invented.
+Archives are capped at 20 MB. Runtime and SQL migration definitions have a parity test.
+
+Retention remains operator-controlled. Removing a run through an approved database
+retention procedure also removes its archive; screenshots are separate local artifacts
+and need independent retention. Neither archive nor summary tables store raw page bodies.

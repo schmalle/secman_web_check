@@ -38,13 +38,8 @@ def test_openrouter_json_becomes_attributed_finding():
         {
             "findings": [
                 {
-                    "category": "architecture gap",
-                    "severity": "medium",
-                    "title": "Review title",
-                    "description": "Supported by evidence",
-                    "evidence": "Observed metadata",
-                    "recommendation": "Review configuration",
-                    "confidence": 0.7,
+                    "category": "configuration",
+                    "evidenceIds": ["target:status"],
                 }
             ]
         }
@@ -52,7 +47,7 @@ def test_openrouter_json_becomes_attributed_finding():
     findings = _parse(
         {"choices": [{"message": {"content": content}}]}, target_result(), "test/model"
     )
-    assert findings[0].rule_id == "LLM-architecture-gap"
+    assert findings[0].rule_id == "LLM-configuration"
     assert findings[0].model == "test/model"
     assert findings[0].engine == "secman-web-check-openrouter"
 

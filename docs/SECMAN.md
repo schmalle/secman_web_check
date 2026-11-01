@@ -26,20 +26,26 @@ without a URI are skipped rather than guessed, and no asset is created or auto-b
 
 `WEB_SECURITY` snapshots include an additive inventory block containing the current
 exposure observation and detected JavaScript libraries, CSS libraries, and web servers.
-The exposure observation carries the received body length and marks a URL as
-`AUTHENTICATED` when the body is exactly the AWS API Gateway
-`Missing Authentication Token` response.
+The local report retains received body length and the legacy `AUTHENTICATED` label
+for the AWS API Gateway `Missing Authentication Token` response. REST v1 sends
+`REACHABLE` with an authentication-required metadata flag; it does not assert
+authenticated access.
 Inventory coverage is independent of finding coverage. A successful complete inventory
 snapshot may resolve an absent component; partial, failed, or truncated collection never
 does. Visual snapshots do not submit component inventory.
 Visual uploads always set finding `completeCoverage=false`: model observations and
 screenshot-only runs cannot prove that an older visual finding is absent.
 
-A complete successful target may resolve older absent findings for that scanner/subject.
+Baseline resolution requires a complete successful passive target, an eligible non-query
+HTTP-200 context without redirects, plus an exact operator-approved `SECMAN_BASELINE_PROFILE_SHA256` matching the
+report's canonical profile hash. Without that approval, finding and inventory snapshots
+are non-terminal. This protects lifecycle boundaries when remote REST v1 does not enforce
+manifest equivalence. Review catalogue, scope and limits before approving a changed hash.
 Partial and failed results set `completeCoverage=false`, so they never resolve older
 findings. Stable external IDs and deterministic run keys make a retry idempotent.
 
-Active probes, crawling, directory discovery, external scanners, and AI agent runs use
+Active probes, TLS vulnerability probes, crawling, browser discovery, JavaScript inventory,
+system review, directory discovery, external scanners, and AI agent runs use
 `SECMAN_EXTENDED_SCANNER_ID` with a separate `WEB_SECURITY` registration. Their upload
 sets finding and inventory `completeCoverage=false` until SecMan has a profile-aware
 coverage contract. This prevents selective checks from resolving older findings. Bind
@@ -112,3 +118,69 @@ unexpected columns, malformed rows, and the same normalized target assigned to
 different accounts are rejected before scanning.
 The account is included in the JSON report and in the SecMan subject-selection step.
 A ready-to-edit example is available at `testdata/targets-aws.csv`.
+
+
+Schema 1.3 evidence/coverage, scripts, API inventory and analysis provenance are carried
+in snapshot metadata without changing REST v1 top-level fields. Review additions reach
+the primary security snapshot (or visual snapshot in visual-only mode), preserving
+separate mode lifecycles. They remain non-terminal and require human review. All baseline
+profiles are non-terminal unless the exact hash is approved through the environment.
+
+## Durable delivery and standalone report upload
+
+`--push-to-secman` now retains JSON plus a private SQLite delivery queue before upload.
+`--defer-secman` (with `--push-to-secman`) queues without contacting SecMan; an explicitly
+configured `SECMAN_URL` identifies the destination, but credentials are not needed until
+retry. Standalone scans still make no SecMan calls. Subject discovery remains a separate
+explicit network operation and fails closed when unavailable.
+
+```sh
+secman-web-check scan https://example.com --push-to-secman --defer-secman --format json
+secman-web-check delivery status
+secman-web-check delivery retry
+secman-web-check delivery retry --resume-blocked
+secman-web-check delivery upload --report scan.json --scanner-id 41 --mode security
+secman-web-check delivery upload --report scan.json --scanner-id 41 --mode security --defer
+```
+
+Mode is `security`, `security-extended`, or `visual`. Combined reports are for local
+review: upload the separate `*-security.json` and `*-visual.json` mode reports instead.
+The JSON export preserves exact subject/asset IDs discovered from SecMan. The existing
+account-first URI/hostname matching remains available for direct targets without IDs.
+An already prepared delivery is never remapped on retry.
+
+`SECMAN_WEB_CHECK_OUTBOX` selects the private queue directory, defaulting to
+`~/.local/state/secman-web-check/delivery`. The POSIX queue uses stdlib SQLite, contains
+no credentials, and serializes senders with a file lock. Bounds: 1,000 records, 256 MiB
+of templates, 8 MiB per template. There is no automatic purge. Archive acknowledged
+queues deliberately; never discard pending records to make room.
+
+Timeouts, HTTP 429 and transient failures are retried with backoff; permanent errors
+remain blocked. Correct the problem before `--resume-blocked`. v1 rejects a delayed
+snapshot older than its latest accepted run; the queue retains that rejection without
+changing timestamps. Late history-only ingestion is a future v2 capability.
+
+Local DB persistence and each mode's upload are attempted independently. A synchronous
+failure exits 2; deferred delivery leaves the scan outcome in control of the exit code.
+Status output distinguishes pending, blocked and delivered records without printing
+payloads or credentials.
+
+REST v1 exposure sends only supported fields: body length stays in the local report.
+The legacy local `AUTHENTICATED` observation maps to central `REACHABLE` with
+`authenticationRequired` in run metadata; it never means a successful authenticated
+session or grants complete coverage. Metadata uses bounded counts/profile attribution;
+full discovery evidence stays in the local JSON archive. Baseline resolution still
+requires the exact approved profile, a successful complete HTTP-200 observation,
+no redirects and no query context. Extended and visual results never resolve by absence.
+
+Saved-report uploads are always non-resolving: report fields are assertions, not
+proof that an approved baseline ran. Live passive uploads require a nonempty
+approved profile hash matching the recomputed manifest. Imported asset IDs must
+also match the target URL/hostname and supplied account.
+
+For an irrecoverable blocked request (for example a late snapshot rejected with
+409), inspect `delivery status`, then run
+`secman-web-check delivery quarantine --delivery-id ID`. This retains the
+request and error locally but allows later deliveries to proceed. Quarantine
+only after deciding that this request should never be retried; it is not an
+acknowledgement that SecMan accepted it.

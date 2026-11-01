@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -37,6 +38,10 @@ def _finding_document(finding: Finding) -> dict[str, Any]:
         "engine": finding.engine,
         "model": finding.model,
         "createdAt": _timestamp(finding.created_at),
+        "evidenceIds": list(finding.evidence_ids),
+        "validationStatus": finding.validation_status,
+        "promptHash": finding.prompt_hash,
+        "policyVersion": finding.policy_version,
     }
 
 
@@ -69,7 +74,7 @@ def _exposure_document(exposure: ExposureObservation | None) -> dict[str, Any] |
 
 def _javascript_document(asset: JavaScriptAsset) -> dict[str, Any]:
     return {
-        "url": asset.url,
+        "url": public_url(asset.url),
         "sha256": asset.sha256,
         "sizeBytes": asset.size_bytes,
         "statusCode": asset.status_code,
@@ -81,6 +86,8 @@ def _target_document(target: TargetResult) -> dict[str, Any]:
     return {
         "url": public_url(target.target.url),
         "awsAccountNumber": target.target.aws_account_number,
+        "secmanSubjectId": target.target.secman_subject_id,
+        "secmanAssetId": target.target.secman_asset_id,
         "status": target.status.value,
         "complete": target.complete,
         "inventoryComplete": target.inventory_complete,
@@ -93,11 +100,34 @@ def _target_document(target: TargetResult) -> dict[str, Any]:
             "crawlComplete": target.coverage.crawl_complete,
             "agentActions": target.coverage.agent_actions,
             "agentComplete": target.coverage.agent_complete,
+            "queryInput": target.coverage.query_input,
+            "executions": [
+                {**asdict(item), "evidence_ids": list(item.evidence_ids)}
+                for item in target.coverage.executions
+            ],
         },
         "exposure": _exposure_document(target.exposure),
         "components": [_component_document(component) for component in target.components],
         "javascriptAssets": [_javascript_document(asset) for asset in target.javascript_assets],
         "errors": list(target.errors),
+        "evidenceRecords": [asdict(item) for item in target.evidence_records],
+        "apiOperations": [
+            {
+                **asdict(item),
+                "parameters": list(item.parameters),
+                "request_content_types": list(item.request_content_types),
+                "response_content_types": list(item.response_content_types),
+            }
+            for item in target.api_operations
+        ],
+        "analysisStages": [
+            {
+                **asdict(item),
+                "started_at": _timestamp(item.started_at),
+                "completed_at": _timestamp(item.completed_at),
+            }
+            for item in target.analysis_stages
+        ],
         "startedAt": _timestamp(target.started_at),
         "completedAt": _timestamp(target.completed_at),
         "findings": [_finding_document(finding) for finding in target.findings],
@@ -106,9 +136,12 @@ def _target_document(target: TargetResult) -> dict[str, Any]:
 
 def run_document(run: ScanRun) -> dict[str, Any]:
     return {
-        "schemaVersion": "1.2",
+        "schemaVersion": "1.3",
         "runId": run.run_id,
         "profile": run.profile,
+        "profileHash": run.profile_hash,
+        "trafficMetrics": json.loads(run.metrics_json),
+        "coverageManifest": json.loads(run.manifest_json),
         "startedAt": _timestamp(run.started_at),
         "completedAt": _timestamp(run.completed_at),
         "targets": [_target_document(target) for target in run.targets],

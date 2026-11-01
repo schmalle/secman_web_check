@@ -7,6 +7,7 @@ import socket
 import ssl
 import threading
 from collections.abc import Callable, Iterable, Mapping
+from contextlib import nullcontext
 from dataclasses import dataclass, replace
 from time import monotonic, sleep
 from urllib.parse import urljoin, urlsplit, urlunsplit
@@ -25,6 +26,12 @@ from .targets import (
     normalize_target,
     resolve_allowed,
 )
+from .traffic import TrafficController
+
+
+def target_origin(target: NormalizedTarget) -> str:
+    return f"{target.scheme}://{target.host}:{target.port or (443 if target.scheme == 'https' else 80)}"
+
 
 _REDIRECTS = {301, 302, 303, 307, 308}
 _SAFE_HEADERS = {"accept", "accept-language", "origin", "cache-control", "pragma"}
@@ -211,9 +218,11 @@ class _PinnedTransport(httpx.HTTPTransport):
         )
 
 
-def pinned_transport(target: NormalizedTarget, addresses: tuple[str, ...]) -> httpx.HTTPTransport:
+def pinned_transport(
+    target: NormalizedTarget, addresses: tuple[str, ...], *, deadline: float | None = None
+) -> httpx.HTTPTransport:
     """Build a verified synchronous transport that can dial only approved IP literals."""
-    return _PinnedTransport(PinnedNetworkBackend(target, addresses))
+    return _PinnedTransport(PinnedNetworkBackend(target, addresses, deadline=deadline))
 
 
 class _SingleHopClient(httpx.Client):
@@ -290,7 +299,9 @@ class HttpCollector:
         allowed_origins: frozenset[str] | None = None,
         budget: RequestBudget | None = None,
         deadline: float | None = None,
+        traffic: TrafficController | None = None,
     ) -> None:
+        self.traffic = traffic
         self.config = config if config is not None else ScannerConfig()
         self._policy = AddressPolicy.from_config(self.config)
         self._resolver = resolver
@@ -306,6 +317,7 @@ class HttpCollector:
             network_backend=self._network_backend,
             allowed_origins=self._allowed_origins,
             budget=self._budget,
+            traffic=self.traffic,
             deadline=min(deadline, self._deadline) if self._deadline else deadline,
         )
 
@@ -320,6 +332,7 @@ class HttpCollector:
             network_backend=self._network_backend,
             allowed_origins=self._allowed_origins,
             budget=budget,
+            traffic=self.traffic,
             deadline=self._deadline,
         )
 
@@ -330,6 +343,7 @@ class HttpCollector:
             network_backend=self._network_backend,
             allowed_origins=self._allowed_origins,
             budget=self._budget,
+            traffic=self.traffic,
             deadline=self._deadline,
         )
 
@@ -340,6 +354,7 @@ class HttpCollector:
             network_backend=self._network_backend,
             allowed_origins=self._allowed_origins,
             budget=self._budget,
+            traffic=self.traffic,
             deadline=self._deadline,
         )
 
@@ -350,6 +365,7 @@ class HttpCollector:
             network_backend=self._network_backend,
             allowed_origins=allowed_origins,
             budget=self._budget,
+            traffic=self.traffic,
             deadline=self._deadline,
         )
 
@@ -491,6 +507,9 @@ class HttpCollector:
         started = monotonic()
         # A new client per hop prevents both cookie replay and connection reuse across DNS checks.
         with (
+            self.traffic.admit(target_origin(target), "http", deadline)
+            if self.traffic
+            else nullcontext(),
             _SingleHopClient(
                 transport=_PinnedTransport(backend),
                 timeout=timeout,

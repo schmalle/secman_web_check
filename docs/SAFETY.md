@@ -7,7 +7,9 @@ authorized SecMan subject. `--crawl` is required to follow links from that initi
 ## Default passive behavior
 
 Without `--active`, each target receives a bounded `GET` plus a bounded request to
-`/.well-known/security.txt`. HTTPS targets also receive bounded TLS capability checks.
+`/.well-known/security.txt`. HTTPS targets also receive bounded certificate/protocol TLS inventory. Heartbleed,
+ROBOT, CCS injection, renegotiation and fallback probes require `--tls-vulnerabilities`;
+`--active` independently controls HTTP probes.
 The HTTP collector:
 
 - accepts only HTTP and HTTPS URLs without credentials or fragments;
@@ -73,13 +75,40 @@ Do not modify it to bypass target policy or TLS verification for operational sca
 ## Optional extended checks
 
 Content discovery and external scanner adapters are separate explicit opt-ins. Content
-discovery is bounded to at most 100 validated relative paths and is neither recursive nor
-fuzzed. Nuclei is limited to technology, misconfiguration, and exposure templates with
-DoS/fuzz/intrusive tags excluded. Nikto uses the non-destructive tuning classes. Both
-adapters use one worker, a low request rate or bounded runtime, no interactive features,
-and ephemeral output.
+discovery is bounded to fixed validated relative paths. External scans require reviewed,
+checksum-pinned binary/template/database assets and an explicit origin-root target.
+Tag-based trust has been replaced by exact assets and supported native containment.
+Children can reach only a scope proxy, which validates/pins the destination; Nuclei has
+updates/interactions/redirects/raw output disabled and Nikto uses fixed safe tuning.
+Missing containment or unsafe/invalid profiles fail closed. The native containment
+fixture is documented in EVALUATION.md; real engine-version compatibility remains an
+installation-specific requirement.
 
-Immediately before each external process, DNS is revalidated against the normal address
-policy. The process receives an approved IP literal as its network target and receives
-the original hostname only as HTTP Host / virtual-host and TLS SNI metadata. Private
-targets still require `--allow-private-targets`.
+
+## Shared budgets, external containment and evidence
+
+One run/origin controller admits HTTP hops, TLS TCP sockets, browser requests and
+provider calls across spawned target workers. It bounds concurrent admissions, rates,
+operations and provider calls, with cancellation and hard worker deadlines. External
+CONNECT tunnels are connection-level admissions with additional byte/time/native-rate
+bounds; encrypted requests within a tunnel are not individually counted. See CLI.md.
+
+External engines now require a checksum-pinned reviewed manifest, copied/verified assets,
+an explicitly authorized origin-root input and supported native macOS confinement.
+Children have only the scope proxy as permitted network egress; the proxy validates every
+new destination and denies other origins. Direct egress and user-home reads are denied;
+output writes are restricted to a temporary directory and capped before parsing. No
+unrestricted fallback exists on unsupported platforms. Pinning is not a substitute for
+reviewing the exact templates/plugins as read-only.
+
+URLs cross producer/serialization boundaries without userinfo/query/fragment. Review
+providers receive typed observation IDs, not raw page/model text. Findings and analysis
+stages retain evidence, model, prompt-hash and policy attribution. Strict review schemas
+reject invented evidence and arbitrary text; visual schemas reject unknown/malformed
+categories. All AI paths request the same retention policy and have bounded payloads.
+No claim of provider-side deletion is inferred from a request flag.
+
+The full normalized JSON archive contains derived records only. Browser discovery does
+not write screenshots, replay sessions, click arbitrary controls or execute writes.
+Observed blocked write operations are marked inventory-only. Declared API operations
+are never executed merely because a method or parameter appears in a schema.

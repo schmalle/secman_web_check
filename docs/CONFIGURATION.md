@@ -12,10 +12,18 @@ the `[scan]` table selected with `--config`, then built-in safe defaults.
 | `max_redirects` | `SECMAN_WEB_CHECK_MAX_REDIRECTS` | `5` | integer >= 0 |
 | `connect_timeout_seconds` | `SECMAN_WEB_CHECK_CONNECT_TIMEOUT_SECONDS` | `10.0` | number > 0 |
 | `read_timeout_seconds` | `SECMAN_WEB_CHECK_READ_TIMEOUT_SECONDS` | `20.0` | number > 0 |
+| `request_timeout_seconds` | `SECMAN_WEB_CHECK_REQUEST_TIMEOUT_SECONDS` | `60.0` | finite number > 0 |
+| `target_timeout_seconds` | `SECMAN_WEB_CHECK_TARGET_TIMEOUT_SECONDS` | `300.0` | finite number > 0 |
 
 Unknown keys and fractional values for integer fields are rejected. CLI `--active` and
 `--allow-private-targets` are independent opt-ins. Secrets are deliberately excluded
 from TOML and CLI arguments.
+
+The positive CLI flags do not override an enabled environment/TOML setting with false:
+omitting `--active` or `--allow-private-targets` leaves those settings effective. See the
+[CLI reference](CLI.md) for complete option combinations, precedence and exit behavior.
+The [implementation status](IMPLEMENTATION.md) records the completed redaction,
+coverage and provider-policy changes. Full CLI combinations are in [CLI.md](CLI.md).
 
 MariaDB environment variables:
 
@@ -31,6 +39,9 @@ SecMan environment variables:
   `SECMAN_EXTENDED_SCANNER_ID` for opt-in extended security checks, and
   `SECMAN_VISUAL_SCANNER_ID` for visual mode. A baseline single-mode run may use the legacy
   `SECMAN_SCANNER_ID`; combined runs deliberately require both mode-specific IDs.
+- Optional baseline lifecycle approval: `SECMAN_BASELINE_PROFILE_SHA256`, the exact
+  canonical passive profile hash reviewed by the operator; absent/mismatched means
+  finding and inventory uploads remain non-terminal.
 - Authentication: `SECMAN_TOKEN`, or both `SECMAN_USERNAME` and `SECMAN_PASSWORD`.
 
 Visual analysis environment variables:
@@ -66,10 +77,9 @@ The review system prompt is loaded from the packaged
 prompt. The distribution also includes focused `src/prompts/aws-security-review.txt` and
 `src/prompts/secrets-security-review.txt` templates. The default prompt covers supported
 AWS and secret-exposure indicators; the focused templates provide stricter review scopes.
-An empty or unreadable prompt aborts before scanning. The model receives only
-sanitized result metadata, component evidence, deterministic findings, stage errors,
-the optional AWS account binding, and JavaScript checksums—not raw HTTP or JavaScript
-response bodies. Both
+An empty or unreadable prompt aborts before scanning. The model receives typed observation IDs, rule/severity metadata, component identity,
+script checksums/metadata, status and optional AWS account binding. It does not receive
+raw HTTP/JavaScript bodies or arbitrary response/model text. Both
 `--llm-review` and `--javascript-inventory` are explicit, independent opt-ins.
 
 Load secrets from a secret manager into the process environment. Do not commit a filled
@@ -98,3 +108,26 @@ on POSIX), reports that target as failed/incomplete, and retains completed sibli
 This outer deadline includes DNS, TLS, provider and external-tool analysis. Direct
 `scan_target` callers and browser interception retain HTTP-operation deadlines; those
 in-process calls do not interrupt a blocked operating-system resolver.
+
+## Shared execution configuration
+
+| TOML key | Environment variable | Default |
+| --- | --- | ---: |
+| `requests_per_second` | `SECMAN_WEB_CHECK_REQUESTS_PER_SECOND` | `1.0` |
+| `global_requests_per_second` | `SECMAN_WEB_CHECK_GLOBAL_REQUESTS_PER_SECOND` | `20.0` |
+| `per_origin_concurrency` | `SECMAN_WEB_CHECK_PER_ORIGIN_CONCURRENCY` | `1` |
+| `max_operations` | `SECMAN_WEB_CHECK_MAX_OPERATIONS` | `10000` |
+| `max_provider_calls` | `SECMAN_WEB_CHECK_MAX_PROVIDER_CALLS` | `50` |
+| `tls_vulnerabilities` | `SECMAN_WEB_CHECK_TLS_VULNERABILITIES` | `false` |
+
+Rates must be finite and positive; integer budgets must be at least one. CLI equivalents
+are listed in the CLI reference. Positive TLS opt-in flags, like other positive flags,
+do not disable true environment/TOML settings when omitted. Default TLS commands exclude
+Heartbleed, ROBOT, CCS injection and renegotiation/fallback vulnerability probes.
+
+One run-wide controller spans both scan modes and all analysis stages. HTTP hops and TLS
+TCP connections are individually admitted; external CONNECT tunnels use connection-level
+admission and native tool pacing. Counter units are documented in CLI.md. Security and
+visual targets run in deadline-enforced spawned workers. Provider DNS is independently
+interruptible; response streams have cumulative deadlines and bounded request/response
+sizes. Provider calls share one maximum-call budget, regardless of which AI feature uses it.

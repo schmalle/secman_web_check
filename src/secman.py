@@ -14,6 +14,7 @@ from urllib.parse import urlsplit, urlunsplit
 import httpx
 import truststore
 
+from .integration_outbox import DeliveryError
 from .models import DetectedComponent, ExposureObservation, Finding, TargetResult
 from .targets import NormalizedTarget, TargetError, normalize_target
 
@@ -25,7 +26,7 @@ def _system_ca_context() -> ssl.SSLContext:
     return truststore.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
 
 
-class SecmanIntegrationError(RuntimeError):
+class SecmanIntegrationError(DeliveryError):
     """Raised when the SecMan integration contract cannot be satisfied."""
 
 
@@ -146,10 +147,9 @@ def _exposure_body(exposure: ExposureObservation) -> dict[str, Any]:
     return {
         "configuredUrl": exposure.configured_url,
         "effectiveUrl": exposure.effective_url,
-        "reachability": exposure.reachability.value,
+        "reachability": "REACHABLE" if exposure.reachability.value == "AUTHENTICATED" else exposure.reachability.value,
         "httpStatus": exposure.http_status,
         "redirectCount": exposure.redirect_count,
-        "bodyLength": exposure.body_length,
         "vantagePoint": exposure.vantage_point,
     }
 
@@ -260,7 +260,7 @@ class IntegrationClient:
             )
         except httpx.HTTPError as error:
             instance.close()
-            raise SecmanIntegrationError("SecMan login request failed") from error
+            raise SecmanIntegrationError("SecMan login request failed", True) from error
         if response.status_code not in {200, 204}:
             instance.close()
             raise SecmanIntegrationError(f"SecMan login failed with HTTP {response.status_code}")
@@ -287,7 +287,7 @@ class IntegrationClient:
                     params={"page": page, "size": size},
                 )
             except httpx.HTTPError as error:
-                raise SecmanIntegrationError("SecMan subject discovery request failed") from error
+                raise SecmanIntegrationError("SecMan subject discovery request failed", True) from error
             if response.status_code != 200:
                 raise SecmanIntegrationError(
                     f"SecMan subject discovery failed with HTTP {response.status_code}"
@@ -308,15 +308,16 @@ class IntegrationClient:
         try:
             response = self._client.post("/api/integrations/v1/runs", json=dict(body))
         except httpx.HTTPError as error:
-            raise SecmanIntegrationError("SecMan run submission request failed") from error
+            raise SecmanIntegrationError("SecMan run submission request failed", True) from error
         if response.status_code not in {200, 201}:
             raise SecmanIntegrationError(
-                f"SecMan run submission failed with HTTP {response.status_code}"
+                f"http_{response.status_code}", response.status_code in {408, 429} or response.status_code >= 500,
+                float(response.headers.get("Retry-After", "0")) if response.headers.get("Retry-After", "0").isdigit() else 0
             )
         try:
             payload = response.json()
         except ValueError as error:
-            raise SecmanIntegrationError("SecMan run submission returned invalid JSON") from error
+            raise SecmanIntegrationError("SecMan run submission returned invalid JSON", True) from error
         if not isinstance(payload, dict):
             raise SecmanIntegrationError("SecMan run submission returned an invalid response")
         return payload

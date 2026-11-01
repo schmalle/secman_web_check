@@ -2,6 +2,7 @@ from types import SimpleNamespace
 
 from sslyze.scanner.scan_command_attempt import ScanCommandAttemptStatusEnum
 
+from secman_web_check.config import ScannerConfig
 from secman_web_check.models import Severity
 from secman_web_check.targets import normalize_target
 from secman_web_check.tls import TlsScanner
@@ -39,7 +40,7 @@ def test_tls_translation_reports_legacy_protocol_weak_cipher_and_heartbleed():
         ),
         robot=attempt(SimpleNamespace(robot_result=SimpleNamespace(name="NOT_VULNERABLE"))),
     )
-    evidence, findings = TlsScanner()._translate(  # type: ignore[reportPrivateUsage]
+    evidence, findings = TlsScanner(ScannerConfig(tls_vulnerabilities=True))._translate(  # type: ignore[reportPrivateUsage]
         normalize_target("https://example.com"), attempts
     )
     assert evidence.complete is True

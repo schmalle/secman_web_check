@@ -1,4 +1,5 @@
 import json
+from hashlib import sha256
 
 from typer.testing import CliRunner
 
@@ -10,7 +11,13 @@ def report(path, findings, *, complete=True, profile="security:passive"):
     path.write_text(
         json.dumps(
             {
-                "schemaVersion": "1.2",
+                "schemaVersion": "1.3",
+                "coverageManifest": {"version": 1, "rules": "fixture"},
+                "profileHash": sha256(
+                    json.dumps(
+                        {"version": 1, "rules": "fixture"}, sort_keys=True, separators=(",", ":")
+                    ).encode()
+                ).hexdigest(),
                 "runId": path.stem,
                 "profile": profile,
                 "targets": [
@@ -18,6 +25,9 @@ def report(path, findings, *, complete=True, profile="security:passive"):
                         "url": "https://example.com/",
                         "status": "SUCCESS",
                         "complete": complete,
+                        "coverage": {
+                            "executions": [{"check_id": "WEB-OLD", "state": "executed-negative"}]
+                        },
                         "findings": [{"externalId": finding} for finding in findings],
                     }
                 ],

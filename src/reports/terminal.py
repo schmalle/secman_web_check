@@ -11,6 +11,7 @@ from ..models import ScanRun, public_url
 def render_terminal(run: ScanRun, console: Console | None = None) -> None:
     output = console if console is not None else Console()
     output.print(f"[bold]SecMan web-security scan[/bold] {run.run_id} ({run.profile})")
+    output.print(f"Profile hash: {run.profile_hash}")
     for target in run.targets:
         output.print(
             f"\n[bold]{public_url(target.target.url)}[/bold] — {target.status.value} "
@@ -41,14 +42,40 @@ def render_terminal(run: ScanRun, console: Console | None = None) -> None:
         table.add_column("Rule")
         table.add_column("Finding")
         table.add_column("Evidence")
+        table.add_column("Attribution / validation")
         for finding in target.findings:
             table.add_row(
                 finding.severity.value,
                 finding.rule_id,
                 finding.title,
                 finding.evidence,
+                f"{finding.engine} / {finding.model or '-'} / {finding.validation_status}",
             )
         output.print(table)
+        if target.coverage.executions:
+            counts: dict[str, int] = {}
+            for item in target.coverage.executions:
+                counts[item.state] = counts.get(item.state, 0) + 1
+            output.print(
+                "Check execution states: "
+                + ", ".join(f"{key}={value}" for key, value in sorted(counts.items()))
+            )
+        if target.api_operations:
+            api = Table("Method", "API path", "Source", "Parameters", "Execution")
+            for operation in target.api_operations:
+                api.add_row(
+                    operation.method,
+                    operation.path,
+                    operation.source,
+                    ", ".join(operation.parameters),
+                    "executed" if operation.executed else "inventory only",
+                )
+            output.print(api)
+        for stage in target.analysis_stages:
+            output.print(
+                f"Analysis {stage.name}: {stage.state}; model={stage.model}; "
+                f"prompt={stage.prompt_hash}; policy={stage.policy_version}"
+            )
         if target.components:
             components = Table(show_header=True)
             components.add_column("Category")
@@ -71,7 +98,7 @@ def render_terminal(run: ScanRun, console: Console | None = None) -> None:
             scripts.add_column("HTTP")
             for asset in target.javascript_assets:
                 scripts.add_row(
-                    asset.url,
+                    public_url(asset.url),
                     asset.sha256,
                     str(asset.size_bytes),
                     str(asset.status_code),

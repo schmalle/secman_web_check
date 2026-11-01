@@ -31,3 +31,19 @@ proof of a vulnerability. The agent's active findings come from deterministic ch
 visual findings still require a human to validate their context. No authenticated
 testing, role comparison, arbitrary payload generation, or autonomous scope expansion
 is available.
+
+
+## Evidence review and shared provider policy
+
+`--llm-review` uses typed observations with known evidence IDs. It accepts only fixed
+categories and references to those IDs; no model-authored titles, severities, excerpts
+or remediation text are persisted. Different reference sets have different identities.
+Findings are INFO observations marked `needs-review`, carrying model, prompt hash and
+policy version. A later provider failure records a failed analysis stage without losing
+completed deterministic or earlier reviewed results. The same additions reach local
+reports, the full archive and the primary mode's non-terminal SecMan snapshot.
+
+All three AI paths share pinned transport, interruptible DNS, strict schemas, bounded
+payload/response sizes, cumulative deadlines, privacy-policy routing and one run-wide
+call budget. Provider routing requests are not proof of provider-side deletion.
+No model observation or variable-agent absence can establish resolution in comparison.

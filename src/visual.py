@@ -7,22 +7,30 @@ import base64
 import hashlib
 import ipaddress
 import json
+import math
 import re
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from dataclasses import dataclass
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
+from time import monotonic
 from typing import Any, Self
 from urllib.parse import urlsplit
 from uuid import uuid4
 
 import httpx
 
+from .api_inventory import observed_operation
 from .config import ScannerConfig
+from .coverage import manifest
 from .crawler import origin
-from .http import CollectionError, HttpCollector, RequestBudget, pinned_transport
+from .http import CollectionError, HttpCollector, HttpResponseEvidence, RequestBudget
 from .models import (
+    AnalysisStage,
+    ApiOperation,
     CoverageSummary,
+    EvidenceRecord,
     Finding,
     ScanRun,
     Severity,
@@ -30,7 +38,8 @@ from .models import (
     TargetStatus,
     public_url,
 )
-from .orchestrator import ProgressCallback
+from .orchestrator import ProgressCallback, _bounded_scan_target
+from .provider import POLICY_VERSION, post_json
 from .targets import (
     AddressDenied,
     AddressPolicy,
@@ -38,6 +47,7 @@ from .targets import (
     normalize_target,
     resolve_allowed,
 )
+from .traffic import TrafficController, traffic_run
 
 _SYSTEM_PROMPT = """Review an operator-redacted web screenshot. Report only content visible
 in the crop. A public page, login form, or generic error is not a finding. Return category,
@@ -64,6 +74,9 @@ class VisualOptions:
     viewport_height: int = 900
     allowed_origins: frozenset[str] = frozenset()
     redacted_crops: Path | None = None
+    traffic: TrafficController | None = None
+    capture_screenshots: bool = True
+    start_index: int = 1
 
     def __post_init__(self) -> None:
         if self.analyze and not self.api_key:
@@ -87,6 +100,9 @@ class PageCapture:
     status_code: int | None
     error: str | None = None
     request_count: int = 0
+    discovered_urls: tuple[str, ...] = ()
+    api_operations: tuple[ApiOperation, ...] = ()
+    responses: tuple[HttpResponseEvidence, ...] = ()
 
 
 def _safe_name(target: NormalizedTarget, index: int) -> str:
@@ -112,6 +128,7 @@ def _route_handler(
     policy: AddressPolicy,
     collector: HttpCollector | None = None,
     allowed_origins: frozenset[str] | None = None,
+    observe: Callable[[Any, HttpResponseEvidence | None], None] | None = None,
 ) -> Callable[[Any], Awaitable[None]]:
     pinned = collector or HttpCollector(ScannerConfig(allow_private_targets=policy.allow_private))
 
@@ -124,6 +141,8 @@ def _route_handler(
             await route.abort()
             return
         if getattr(request, "method", "GET") not in {"GET", "HEAD"}:
+            if observe:
+                observe(request, None)
             await route.abort()
             return
         try:
@@ -137,6 +156,8 @@ def _route_handler(
         except (CollectionError, AddressDenied, ValueError):
             await route.abort()
             return
+        if observe:
+            observe(request, evidence)
         headers = {
             name: value
             for name, value in evidence.headers
@@ -170,7 +191,8 @@ class BrowserCapturer:
     async def __aenter__(self) -> Self:
         from playwright.async_api import async_playwright
 
-        self.options.output_dir.mkdir(parents=True, exist_ok=True)
+        if self.options.capture_screenshots:
+            self.options.output_dir.mkdir(parents=True, exist_ok=True)
         self._playwright = await async_playwright().start()
         try:
             self._browser = await self._playwright.chromium.launch(
@@ -199,7 +221,28 @@ class BrowserCapturer:
             raise RuntimeError("browser capturer is not open")
         context = None
         page = None
-        budget = RequestBudget(200, 1.0)
+        budget = RequestBudget(200, self.config.requests_per_second)
+        observed: list[ApiOperation] = []
+        responses: list[HttpResponseEvidence] = []
+
+        def observe(request: Any, evidence: HttpResponseEvidence | None) -> None:
+            if evidence is not None:
+                responses.append(evidence)
+            if request.resource_type in {"xhr", "fetch"}:
+                mime = (
+                    next(
+                        (
+                            value
+                            for name, value in evidence.headers
+                            if name.lower() == "content-type"
+                        ),
+                        "",
+                    )
+                    if evidence
+                    else ""
+                )
+                observed.append(observed_operation(request.url, request.method, mime))
+
         try:
             origins = self.options.allowed_origins | {origin(target.url)}
             context = await self._browser.new_context(
@@ -222,8 +265,14 @@ class BrowserCapturer:
                 "**/*",
                 _route_handler(
                     self.policy,
-                    HttpCollector(self.config, budget=budget).with_allowed_origins(origins),
+                    HttpCollector(
+                        self.config,
+                        budget=budget,
+                        traffic=self.options.traffic,
+                        deadline=monotonic() + self.config.target_timeout_seconds,
+                    ).with_allowed_origins(origins),
                     origins,
+                    observe,
                 ),
             )
             page = await context.new_page()
@@ -251,23 +300,28 @@ class BrowserCapturer:
                 return PageCapture(target.url, final_url, None, "", "", status_code)
             title = (await page.title())[:300]
             text = re.sub(r"\s+", " ", await page.locator("body").inner_text())[:4000]
-            path = self.options.output_dir / _safe_name(target, index)
-            page_height = await page.evaluate(
-                "() => Math.max(document.documentElement.scrollHeight, document.body.scrollHeight)"
+            links = await page.locator("a[href]").evaluate_all(
+                "nodes => nodes.slice(0, 200).map(node => node.href)"
             )
-            async with self._screenshot_lock:
-                if isinstance(page_height, int) and page_height > 4000:
-                    await page.screenshot(
-                        path=str(path),
-                        clip={
-                            "x": 0,
-                            "y": 0,
-                            "width": self.options.viewport_width,
-                            "height": 4000,
-                        },
-                    )
-                else:
-                    await page.screenshot(path=str(path), full_page=True)
+            path = None
+            if self.options.capture_screenshots:
+                path = self.options.output_dir / _safe_name(target, index)
+                page_height = await page.evaluate(
+                    "() => Math.max(document.documentElement.scrollHeight, document.body.scrollHeight)"
+                )
+                async with self._screenshot_lock:
+                    if isinstance(page_height, int) and page_height > 4000:
+                        await page.screenshot(
+                            path=str(path),
+                            clip={
+                                "x": 0,
+                                "y": 0,
+                                "width": self.options.viewport_width,
+                                "height": 4000,
+                            },
+                        )
+                    else:
+                        await page.screenshot(path=str(path), full_page=True)
             return PageCapture(
                 target.url,
                 final_url,
@@ -276,6 +330,9 @@ class BrowserCapturer:
                 text,
                 status_code,
                 request_count=budget.count,
+                discovered_urls=tuple(link for link in links if isinstance(link, str)),
+                api_operations=tuple(observed),
+                responses=tuple(responses),
             )
         except Exception as error:  # noqa: BLE001 - isolate one browser target
             return PageCapture(
@@ -287,6 +344,9 @@ class BrowserCapturer:
                 None,
                 _safe_error(error),
                 request_count=budget.count,
+                discovered_urls=tuple(link for link in links if isinstance(link, str)),
+                api_operations=tuple(observed),
+                responses=tuple(responses),
             )
         finally:
             if context is not None:
@@ -303,24 +363,31 @@ def _parse_analysis(
     content = message.get("content") if isinstance(message, dict) else None
     if not isinstance(content, str):
         raise TypeError("vision provider returned no text")
-    fenced = re.search(r"```(?:json)?\s*(\{.*\})\s*```", content, re.DOTALL)
-    document = json.loads(fenced.group(1) if fenced else content)
-    rows = document.get("findings", []) if isinstance(document, dict) else []
-    if not isinstance(rows, list):
-        raise TypeError("vision findings must be a list")
+    document = json.loads(content)
+    if not isinstance(document, dict) or set(document) != {"findings"}:
+        raise TypeError("invalid visual response document")
+    rows = document["findings"]
+    if not isinstance(rows, list) or len(rows) > 20:
+        raise TypeError("vision findings must be a bounded list")
     findings: list[Finding] = []
-    for row in rows[:20]:
-        if not isinstance(row, dict):
-            continue
-        category = re.sub(r"[^a-z0-9_-]+", "-", str(row.get("category", "")).lower())
-        if category not in _VISUAL_CATEGORIES:
-            continue
-        severity_name = str(row.get("severity", "MEDIUM")).upper()
-        severity = Severity.__members__.get(severity_name, Severity.MEDIUM)
-        try:
-            confidence = max(0.0, min(1.0, float(row.get("confidence", 0.5))))
-        except (TypeError, ValueError):
-            confidence = 0.5
+    for row in rows:
+        if not isinstance(row, dict) or set(row) != {"category", "severity", "confidence"}:
+            raise TypeError("invalid visual finding fields")
+        category = row["category"]
+        if not isinstance(category, str) or category not in _VISUAL_CATEGORIES:
+            raise ValueError("unknown visual category")
+        severity_name = row["severity"]
+        if not isinstance(severity_name, str) or severity_name.upper() not in Severity.__members__:
+            raise ValueError("invalid visual severity")
+        severity = Severity[severity_name.upper()]
+        confidence = row["confidence"]
+        if (
+            isinstance(confidence, bool)
+            or not isinstance(confidence, (int, float))
+            or not math.isfinite(confidence)
+            or not 0 <= confidence <= 1
+        ):
+            raise ValueError("invalid visual confidence")
         findings.append(
             Finding.create(
                 f"VISUAL-{category}",
@@ -333,6 +400,8 @@ def _parse_analysis(
                 evidence="Model category from operator-redacted crop; human validation required",
                 engine="secman-web-check-visual",
                 model=model,
+                validation_status="needs-review",
+                policy_version=POLICY_VERSION,
             )
         )
     return findings
@@ -404,34 +473,17 @@ async def _analyze(capture: PageCapture, options: VisualOptions) -> list[Finding
             },
         ],
     }
-    provider = normalize_target(options.base_url)
-    addresses = await asyncio.to_thread(resolve_allowed, provider, AddressPolicy())
-
-    def post() -> dict[str, Any]:
-        with (
-            httpx.Client(
-                base_url=options.base_url.rstrip("/"),
-                headers={"Authorization": f"Bearer {options.api_key}"},
-                timeout=options.timeout_seconds,
-                follow_redirects=False,
-                trust_env=False,
-                transport=pinned_transport(provider, addresses),
-            ) as client,
-            client.stream("POST", "/chat/completions", json=body) as response,
-        ):
-            response.raise_for_status()
-            raw = bytearray()
-            for chunk in response.iter_bytes(chunk_size=16_384):
-                raw.extend(chunk)
-                if len(raw) > 65_536:
-                    raise ValueError("Vision provider response exceeded the size limit")
-            payload = json.loads(raw)
-            if not isinstance(payload, dict):
-                raise TypeError("vision provider returned an invalid response")
-            return payload
-
-    payload = await asyncio.to_thread(post)
-    return _parse_analysis(payload, normalize_target(capture.requested_url), options.model)
+    payload = await asyncio.to_thread(
+        post_json, options.base_url, options.api_key, body, options.timeout_seconds, options.traffic
+    )
+    return [
+        replace(
+            item,
+            evidence_ids=("crop:" + hashlib.sha256(crop).hexdigest(),),
+            prompt_hash=hashlib.sha256(_SYSTEM_PROMPT.encode()).hexdigest(),
+        )
+        for item in _parse_analysis(payload, normalize_target(capture.requested_url), options.model)
+    ]
 
 
 async def _scan_visual_async(
@@ -450,7 +502,21 @@ async def _scan_visual_async(
             nonlocal completed
             target_started = datetime.now(UTC)
             async with semaphore:
-                capture = await capturer.capture(target, index + 1)
+                try:
+                    capture = await asyncio.wait_for(
+                        capturer.capture(target, index + options.start_index),
+                        timeout=config.target_timeout_seconds,
+                    )
+                except TimeoutError:
+                    capture = PageCapture(
+                        target.url,
+                        target.url,
+                        None,
+                        "",
+                        "",
+                        None,
+                        "Visual target deadline exceeded",
+                    )
             errors: list[str] = []
             findings: list[Finding] = []
             if capture.error:
@@ -463,10 +529,35 @@ async def _scan_visual_async(
             if not capture.error and capture.status_code != 200 and options.analyze:
                 errors.append("Visual analysis skipped for non-200 response")
             complete = not errors and options.analyze
+            ended = datetime.now(UTC)
             result = TargetResult(
                 target=target,
                 status=TargetStatus.SUCCESS if not errors else TargetStatus.PARTIAL,
                 findings=tuple(findings),
+                analysis_stages=(
+                    AnalysisStage(
+                        "visual-analysis" if options.analyze else "visual-capture",
+                        "failed" if errors else "complete",
+                        target_started,
+                        ended,
+                        options.model if options.analyze else None,
+                        hashlib.sha256(_SYSTEM_PROMPT.encode()).hexdigest()
+                        if options.analyze
+                        else None,
+                        POLICY_VERSION,
+                    ),
+                ),
+                evidence_records=tuple(
+                    EvidenceRecord(
+                        identifier,
+                        item.rule_id,
+                        item.engine,
+                        public_url(target.url),
+                        "Operator-reviewed crop checksum; no image bytes retained in report",
+                    )
+                    for item in findings
+                    for identifier in item.evidence_ids
+                ),
                 coverage=CoverageSummary(
                     pages_scanned=1 if capture.status_code == 200 else 0,
                     pages=(public_url(capture.final_url),) if capture.status_code == 200 else (),
@@ -489,6 +580,16 @@ async def _scan_visual_async(
         started_at=started,
         completed_at=datetime.now(UTC),
         profile="visual-ai" if options.analyze else "visual-capture",
+        manifest_json=manifest(
+            config,
+            visual={
+                "analyze": options.analyze,
+                "model": options.model if options.analyze else None,
+                "origins": sorted(options.allowed_origins),
+                "viewport": [options.viewport_width, options.viewport_height],
+                "policy": POLICY_VERSION,
+            },
+        ),
     )
 
 
@@ -498,9 +599,79 @@ def scan_visual_all(
     options: VisualOptions,
     *,
     progress: ProgressCallback | None = None,
+    traffic: TrafficController | None = None,
 ) -> ScanRun:
     """Capture and optionally analyze all targets while preserving input order."""
-    return asyncio.run(_scan_visual_async(targets, config, options, progress))
+    if traffic is None:
+        with traffic_run(config) as shared:
+            return scan_visual_all(targets, config, options, progress=progress, traffic=shared)
+    started = datetime.now(UTC)
+    options = replace(options, traffic=traffic)
+    results: list[TargetResult | None] = [None] * len(targets)
+    with ThreadPoolExecutor(max_workers=config.concurrency) as executor:
+        jobs = {
+            executor.submit(
+                _bounded_scan_target,
+                target,
+                config,
+                _operation="visual",
+                visual_options=replace(options, start_index=index + 1),
+                traffic=traffic,
+            ): index
+            for index, target in enumerate(targets)
+        }
+        try:
+            for count, future in enumerate(as_completed(jobs), 1):
+                index = jobs[future]
+                try:
+                    results[index] = future.result()
+                except Exception:  # noqa: BLE001 - isolate a failed visual worker
+                    results[index] = TargetResult(
+                        targets[index],
+                        TargetStatus.FAILED,
+                        errors=("Unexpected visual worker failure",),
+                        complete=False,
+                    )
+                if progress:
+                    progress(count, len(targets), results[index])  # type: ignore[arg-type]
+        except KeyboardInterrupt:
+            traffic.cancel()
+            for future, index in jobs.items():
+                if results[index] is None:
+                    future.cancel()
+                    if future.done() and not future.cancelled():
+                        try:
+                            results[index] = future.result()
+                        except Exception:  # noqa: BLE001 - retain other completed targets
+                            results[index] = TargetResult(
+                                targets[index],
+                                TargetStatus.FAILED,
+                                errors=("Unexpected visual worker failure",),
+                                complete=False,
+                            )
+                    else:
+                        results[index] = TargetResult(
+                            targets[index],
+                            TargetStatus.FAILED,
+                            errors=("Run cancelled",),
+                            complete=False,
+                        )
+    return ScanRun(
+        str(uuid4()),
+        tuple(item for item in results if item is not None),
+        started,
+        datetime.now(UTC),
+        "visual-ai" if options.analyze else "visual-capture",
+        manifest(
+            config,
+            visual={
+                "analyze": options.analyze,
+                "model": options.model if options.analyze else None,
+                "origins": sorted(options.allowed_origins),
+                "policy": POLICY_VERSION,
+            },
+        ),
+    )
 
 
 def merge_runs(security: ScanRun, visual: ScanRun) -> ScanRun:
@@ -522,6 +693,10 @@ def merge_runs(security: ScanRun, visual: ScanRun) -> ScanRun:
                     {item.external_id: item for item in (*left.findings, *right.findings)}.values()
                 ),
                 components=left.components,
+                javascript_assets=left.javascript_assets,
+                api_operations=left.api_operations,
+                analysis_stages=(*left.analysis_stages, *right.analysis_stages),
+                evidence_records=(*left.evidence_records, *right.evidence_records),
                 exposure=left.exposure,
                 inventory_complete=left.inventory_complete,
                 coverage=left.coverage,
@@ -537,4 +712,12 @@ def merge_runs(security: ScanRun, visual: ScanRun) -> ScanRun:
         started_at=min(security.started_at, visual.started_at),
         completed_at=max(security.completed_at, visual.completed_at),
         profile=f"combined:{security.profile}+{visual.profile}",
+        manifest_json=json.dumps(
+            {
+                "version": 1,
+                "security": json.loads(security.manifest_json),
+                "visual": json.loads(visual.manifest_json),
+            },
+            sort_keys=True,
+        ),
     )

@@ -90,7 +90,7 @@ def test_build_run_body_includes_sanitized_inventory_snapshot() -> None:
 
     assert inventory["completeCoverage"] is True
     assert inventory["exposure"]["reachability"] == "REACHABLE"
-    assert inventory["exposure"]["bodyLength"] == 2048
+    assert "bodyLength" not in inventory["exposure"]
     assert inventory["components"][0]["name"] == "jQuery"
 
 

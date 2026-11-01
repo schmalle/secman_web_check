@@ -14,8 +14,13 @@ from secman_web_check.visual import (
     _analyze,
     _parse_analysis,
     _route_handler,
-    scan_visual_all,
+    _scan_visual_async,
 )
+
+
+def _unit_scan_visual(targets, config, options):
+    # Unit seams live inside this process; public scan_visual_all separately isolates workers.
+    return asyncio.run(_scan_visual_async(targets, config, options, None))
 
 
 class FakeRequest:
@@ -87,8 +92,7 @@ def test_visual_analysis_maps_to_normalized_finding() -> None:
             {
                 "message": {
                     "content": '{"findings":[{"category":"directory_listing",'
-                    '"severity":"high","title":"Directory listing exposed",'
-                    '"evidence":"Index of /backup","recommendation":"Disable listing",'
+                    '"severity":"high",'
                     '"confidence":0.95}]}'
                 }
             }
@@ -118,7 +122,8 @@ def test_visual_analysis_rejects_unknown_categories() -> None:
         ]
     }
 
-    assert _parse_analysis(payload, normalize_target("https://example.com"), "vision-test") == []
+    with pytest.raises(ValueError, match="unknown visual category"):
+        _parse_analysis(payload, normalize_target("https://example.com"), "vision-test")
 
 
 def test_playwright_bracketed_ipv6_address_uses_normal_address_policy() -> None:
@@ -192,8 +197,10 @@ def test_visual_provider_gets_only_redacted_crop_and_origin(monkeypatch, tmp_pat
             return Response()
 
     monkeypatch.setattr("secman_web_check.visual.httpx.Client", Client)
-    monkeypatch.setattr("secman_web_check.visual.resolve_allowed", lambda *_args: ("1.1.1.1",))
-    monkeypatch.setattr("secman_web_check.visual.pinned_transport", lambda *_args: object())
+    monkeypatch.setattr("secman_web_check.provider.resolve_allowed", lambda *_args: ("1.1.1.1",))
+    monkeypatch.setattr(
+        "secman_web_check.provider.pinned_transport", lambda *_args, **_kwargs: object()
+    )
     capture = PageCapture(
         "https://example.com/?token=secret-query",
         "https://example.com/",
@@ -243,7 +250,7 @@ def test_screenshot_only_scan_cannot_resolve_prior_visual_findings(monkeypatch, 
     monkeypatch.setattr("secman_web_check.visual.BrowserCapturer", Capturer)
     target = normalize_target("https://example.com/")
 
-    result = scan_visual_all((target,), ScannerConfig(), VisualOptions(tmp_path, analyze=False))
+    result = _unit_scan_visual((target,), ScannerConfig(), VisualOptions(tmp_path, analyze=False))
     snapshot = build_run_body(
         7,
         IntegrationSubject(9, 7, 4, "example.com", target.url),
@@ -275,7 +282,7 @@ def test_non_200_visual_analysis_is_incomplete(monkeypatch, tmp_path, status):
 
     monkeypatch.setattr("secman_web_check.visual.BrowserCapturer", Capturer)
     target = normalize_target("https://example.com/")
-    run = scan_visual_all(
+    run = _unit_scan_visual(
         (target,),
         ScannerConfig(),
         VisualOptions(tmp_path, api_key="local-test", redacted_crops=tmp_path),

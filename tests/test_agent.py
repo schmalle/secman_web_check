@@ -92,8 +92,10 @@ def test_openrouter_request_uses_structured_output_and_private_routing(monkeypat
             return Response()
 
     monkeypatch.setattr("secman_web_check.agent.httpx.Client", Client)
-    monkeypatch.setattr("secman_web_check.agent.resolve_allowed", lambda *_args: ("1.1.1.1",))
-    monkeypatch.setattr("secman_web_check.agent.pinned_transport", lambda *_args: object())
+    monkeypatch.setattr("secman_web_check.provider.resolve_allowed", lambda *_args: ("1.1.1.1",))
+    monkeypatch.setattr(
+        "secman_web_check.provider.pinned_transport", lambda *_args, **_kwargs: object()
+    )
 
     action = _ask(AgentOptions("test-key", "test-model"), {"origin": "https://example.com"}, ())
 

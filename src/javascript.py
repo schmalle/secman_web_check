@@ -7,6 +7,7 @@ from hashlib import sha256
 from html.parser import HTMLParser
 from urllib.parse import urljoin, urlsplit
 
+from .crawler import origin
 from .http import CollectionError, HttpCollector, HttpResponseEvidence
 from .models import JavaScriptAsset
 from .targets import AddressDenied, TargetError, normalize_target
@@ -57,12 +58,20 @@ def referenced_javascript(response: HttpResponseEvidence) -> tuple[str, ...]:
 
 
 def inventory_javascript(
-    response: HttpResponseEvidence, collector: HttpCollector
+    response: HttpResponseEvidence,
+    collector: HttpCollector,
+    *,
+    allowed_origins: frozenset[str] = frozenset(),
 ) -> JavaScriptInventory:
     """Fetch each external script through the pinned collector and retain only metadata."""
+    scope = allowed_origins | {origin(response.url)}
+    collector = collector.with_allowed_origins(scope)
     assets: list[JavaScriptAsset] = []
     errors: list[str] = []
     for url in referenced_javascript(response):
+        if origin(url) not in scope:
+            errors.append("JavaScript origin is outside the approved scope")
+            continue
         try:
             script = collector.collect(normalize_target(url))[-1]
             assets.append(
@@ -74,6 +83,8 @@ def inventory_javascript(
                     truncated=script.truncated,
                 )
             )
+            if script.blocked_redirect_reason or script.status_code != 200:
+                errors.append("JavaScript collection was incomplete or its redirect was blocked")
             if script.truncated:
                 errors.append("JavaScript response exceeded the configured limit")
         except (AddressDenied, CollectionError, TargetError, ValueError):

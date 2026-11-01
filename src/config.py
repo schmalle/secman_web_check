@@ -7,6 +7,7 @@ import tomllib
 from collections.abc import Mapping
 from dataclasses import dataclass, fields
 from pathlib import Path
+from typing import Any
 
 _PREFIX = "SECMAN_WEB_CHECK_"
 
@@ -22,6 +23,12 @@ class ScannerConfig:
     read_timeout_seconds: float = 20.0
     request_timeout_seconds: float = 60.0
     target_timeout_seconds: float = 300.0
+    requests_per_second: float = 1.0
+    global_requests_per_second: float = 20.0
+    per_origin_concurrency: int = 1
+    max_operations: int = 10000
+    max_provider_calls: int = 50
+    tls_vulnerabilities: bool = False
 
     def __post_init__(self) -> None:
         if self.concurrency < 1:
@@ -30,6 +37,8 @@ class ScannerConfig:
             raise ValueError("max_body_bytes must be at least 1")
         if self.max_redirects < 0:
             raise ValueError("max_redirects must not be negative")
+        if min(self.per_origin_concurrency, self.max_operations, self.max_provider_calls) < 1:
+            raise ValueError("traffic budgets must be positive")
         if any(
             not math.isfinite(value) or value <= 0
             for value in (
@@ -37,6 +46,8 @@ class ScannerConfig:
                 self.read_timeout_seconds,
                 self.request_timeout_seconds,
                 self.target_timeout_seconds,
+                self.requests_per_second,
+                self.global_requests_per_second,
             )
         ):
             raise ValueError("timeouts must be positive")
@@ -53,9 +64,16 @@ def _parse_bool(value: object, name: str) -> bool:
 
 
 def _coerce(name: str, value: object) -> bool | int | float:
-    if name in {"active", "allow_private_targets"}:
+    if name in {"active", "allow_private_targets", "tls_vulnerabilities"}:
         return _parse_bool(value, name)
-    if name in {"concurrency", "max_body_bytes", "max_redirects"}:
+    if name in {
+        "concurrency",
+        "max_body_bytes",
+        "max_redirects",
+        "per_origin_concurrency",
+        "max_operations",
+        "max_provider_calls",
+    }:
         if isinstance(value, (str, int)) and not isinstance(value, bool):
             return int(value)
         raise ValueError(f"{name} must be an integer")
@@ -64,6 +82,8 @@ def _coerce(name: str, value: object) -> bool | int | float:
         "read_timeout_seconds",
         "request_timeout_seconds",
         "target_timeout_seconds",
+        "requests_per_second",
+        "global_requests_per_second",
     }:
         if isinstance(value, (str, int, float)) and not isinstance(value, bool):
             return float(value)
@@ -101,24 +121,8 @@ def load_config(
         if environment_name in environ:
             values[name] = environ[environment_name]
     values.update({name: value for name, value in overrides.items() if value is not None})
-    return ScannerConfig(
-        concurrency=int(_coerce("concurrency", values.get("concurrency", 20))),
-        active=bool(_coerce("active", values.get("active", False))),
-        allow_private_targets=bool(
-            _coerce("allow_private_targets", values.get("allow_private_targets", False))
-        ),
-        max_body_bytes=int(_coerce("max_body_bytes", values.get("max_body_bytes", 1_048_576))),
-        max_redirects=int(_coerce("max_redirects", values.get("max_redirects", 5))),
-        connect_timeout_seconds=float(
-            _coerce("connect_timeout_seconds", values.get("connect_timeout_seconds", 10.0))
-        ),
-        request_timeout_seconds=float(
-            _coerce("request_timeout_seconds", values.get("request_timeout_seconds", 60.0))
-        ),
-        target_timeout_seconds=float(
-            _coerce("target_timeout_seconds", values.get("target_timeout_seconds", 300.0))
-        ),
-        read_timeout_seconds=float(
-            _coerce("read_timeout_seconds", values.get("read_timeout_seconds", 20.0))
-        ),
-    )
+    defaults = ScannerConfig()
+    coerced: dict[str, Any] = {
+        name: _coerce(name, values.get(name, getattr(defaults, name))) for name in names
+    }
+    return ScannerConfig(**coerced)

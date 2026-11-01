@@ -11,7 +11,7 @@ from secman_web_check.targets import normalize_target
 runner = CliRunner()
 
 
-def clean_run(targets, _config, progress=None):
+def clean_run(targets, _config, progress=None, **_options):
     now = datetime.now(UTC)
     results = tuple(
         TargetResult(target, TargetStatus.SUCCESS, started_at=now, completed_at=now)
@@ -230,7 +230,7 @@ def test_csv_scan_can_submit_results_directly_to_secman(monkeypatch, tmp_path):
     monkeypatch.setattr("secman_web_check.cli.scan_all", clean_run)
     monkeypatch.setattr(
         "secman_web_check.cli._push_to_secman",
-        lambda run, *, active, scanner_id, mode: uploads.append((run, active, scanner_id, mode)),
+        lambda run, *, active, scanner_id, mode, **kwargs: uploads.append((run, active, scanner_id, mode)),
     )
     monkeypatch.setenv("SECMAN_SCANNER_ID", "42")
 
@@ -334,7 +334,7 @@ def test_both_mode_uploads_separate_terminal_snapshots(monkeypatch, tmp_path):
     )
     monkeypatch.setattr(
         "secman_web_check.cli._push_to_secman",
-        lambda run, *, active, scanner_id, mode: uploads.append((scanner_id, mode)),
+        lambda run, *, active, scanner_id, mode, **kwargs: uploads.append((scanner_id, mode)),
     )
     monkeypatch.setenv("SECMAN_SECURITY_SCANNER_ID", "41")
     monkeypatch.setenv("SECMAN_VISUAL_SCANNER_ID", "42")
@@ -359,7 +359,9 @@ def test_both_mode_uploads_separate_terminal_snapshots(monkeypatch, tmp_path):
     assert uploads == [(41, "security"), (42, "visual")]
 
 
-def test_secman_loaded_target_uses_same_asset_binding_for_other_scanner(monkeypatch):
+def test_secman_loaded_target_uses_same_asset_binding_for_other_scanner(monkeypatch, tmp_path):
+    monkeypatch.setenv("SECMAN_URL", "https://secman.example.test")
+    monkeypatch.setenv("SECMAN_WEB_CHECK_OUTBOX", str(tmp_path / "queue"))
     target = replace(
         normalize_target("https://example.com"),
         secman_subject_id=4,
@@ -381,6 +383,7 @@ def test_secman_loaded_target_uses_same_asset_binding_for_other_scanner(monkeypa
 
         def submit_run(self, body):
             uploads.append(body)
+            return {"id": 1, "scannerId": body["scannerId"], "subjectId": body["subjectId"]}
 
     monkeypatch.setattr("secman_web_check.cli._integration_client", Client)
 

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import math
-import threading
 import warnings
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -22,6 +21,8 @@ from .checks.registry import RULES
 from .config import ScannerConfig
 from .models import Finding
 from .targets import AddressPolicy, NormalizedTarget, resolve_allowed
+from .tls_transport import tls_connections
+from .traffic import TrafficController
 
 
 @dataclass(frozen=True, slots=True)
@@ -30,7 +31,7 @@ class TlsEvidence:
     errors: tuple[str, ...] = ()
 
 
-_COMMANDS = {
+_INVENTORY_COMMANDS = {
     ScanCommand.CERTIFICATE_INFO,
     ScanCommand.SSL_2_0_CIPHER_SUITES,
     ScanCommand.SSL_3_0_CIPHER_SUITES,
@@ -39,16 +40,14 @@ _COMMANDS = {
     ScanCommand.TLS_1_2_CIPHER_SUITES,
     ScanCommand.TLS_1_3_CIPHER_SUITES,
     ScanCommand.TLS_COMPRESSION,
+}
+_VULNERABILITY_COMMANDS = {
     ScanCommand.OPENSSL_CCS_INJECTION,
     ScanCommand.TLS_FALLBACK_SCSV,
     ScanCommand.HEARTBLEED,
     ScanCommand.ROBOT,
     ScanCommand.SESSION_RENEGOTIATION,
 }
-
-# Bound process-wide TLS scan parallelism: each SSLyze scan opens many sockets,
-# and unbounded bursts make servers drop or throttle connections mid-scan.
-_SCAN_GATE = threading.Semaphore(3)
 
 
 def _finding(rule_id: str, target: NormalizedTarget, evidence: str) -> Finding:
@@ -82,7 +81,10 @@ def _connectivity_error(result: Any) -> str:
 class TlsScanner:
     """Run a bounded SSLyze scan against an already policy-approved IP."""
 
-    def __init__(self, config: ScannerConfig | None = None) -> None:
+    def __init__(
+        self, config: ScannerConfig | None = None, *, traffic: TrafficController | None = None
+    ) -> None:
+        self.traffic = traffic
         self.config = config if config is not None else ScannerConfig()
 
     def scan(self, target: NormalizedTarget) -> tuple[TlsEvidence, tuple[Finding, ...]]:
@@ -100,19 +102,22 @@ class TlsScanner:
             network_timeout=max(1, math.ceil(self.config.connect_timeout_seconds)),
             network_max_retries=3,
         )
-        with _SCAN_GATE, warnings.catch_warnings():
+        with tls_connections(target, self.config, self.traffic), warnings.catch_warnings():
             warnings.filterwarnings(
                 "ignore",
                 message="Parsed a serial number which wasn't positive.*",
                 category=Warning,
             )
             scanner = Scanner(
-                per_server_concurrent_connections_limit=2, concurrent_server_scans_limit=1
+                per_server_concurrent_connections_limit=1, concurrent_server_scans_limit=1
             )
             scanner.queue_scans(
                 [
                     ServerScanRequest(
-                        location, network_configuration=network, scan_commands=_COMMANDS
+                        location,
+                        network_configuration=network,
+                        scan_commands=_INVENTORY_COMMANDS
+                        | (_VULNERABILITY_COMMANDS if self.config.tls_vulnerabilities else set()),
                     )
                 ]
             )
@@ -129,6 +134,14 @@ class TlsScanner:
         results: dict[str, Any | None] = {}
 
         def completed(name: str) -> Any | None:
+            if not self.config.tls_vulnerabilities and name in {
+                "openssl_ccs_injection",
+                "tls_fallback_scsv",
+                "heartbleed",
+                "robot",
+                "session_renegotiation",
+            }:
+                return None
             if name in results:
                 return results[name]
             attempt = getattr(attempts, name)

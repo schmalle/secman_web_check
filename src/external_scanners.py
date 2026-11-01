@@ -2,16 +2,18 @@
 
 from __future__ import annotations
 
-import ipaddress
 import json
-import shutil
-import subprocess
+import re
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import urlsplit
 
+from .external_profile import ExternalProfile, confined_run, verified_copy
+from .external_proxy import scoped_proxy
 from .models import Finding, Severity
 from .targets import AddressPolicy, NormalizedTarget, resolve_allowed
+from .traffic import TrafficController
 
 SUPPORTED_SCANNERS = frozenset({"nuclei", "nikto"})
 
@@ -26,57 +28,43 @@ class ExternalScanResult:
     errors: tuple[str, ...] = ()
 
 
-def _pinned_target(target: NormalizedTarget, address: str) -> str:
-    host = f"[{address}]" if ipaddress.ip_address(address).version == 6 else address
-    port = f":{target.port}" if target.port is not None else ""
-    return f"{target.scheme}://{host}{port}/"
+def _rule(value: object) -> str:
+    result = str(value)
+    if not re.fullmatch(r"[A-Za-z0-9_.-]{1,100}", result):
+        raise ExternalScannerError("invalid external rule identity")
+    return result
 
 
 def _severity(value: str) -> Severity:
     return Severity.__members__.get(value.upper(), Severity.INFO)
 
 
-def _run(command: list[str], output: Path, timeout: float) -> None:
-    try:
-        completed = subprocess.run(
-            command,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            check=False,
-            timeout=timeout,
-            env={"PATH": "/usr/local/bin:/usr/bin:/bin"},
-        )
-    except (OSError, subprocess.TimeoutExpired) as error:
-        raise ExternalScannerError("external scanner execution failed") from error
-    if completed.returncode not in {0, 1} or not output.exists():
-        raise ExternalScannerError("external scanner returned an unusable result")
-
-
-def _nuclei(target: NormalizedTarget, address: str, output: Path, timeout: float) -> list[Finding]:
-    executable = shutil.which("nuclei")
-    if executable is None:
-        raise ExternalScannerError("nuclei executable is not installed")
-    authority = target.host if target.port is None else f"{target.host}:{target.port}"
+def _nuclei(
+    target: NormalizedTarget, output: Path, timeout: float, profile: ExternalProfile, port: int
+) -> list[Finding]:
+    entry = profile.entry("nuclei")
+    executable = verified_copy(entry, output.parent / "nuclei")
+    templates = tuple(
+        verified_copy(asset, output.parent / f"template-{index}.yaml")
+        for index, asset in enumerate(entry["assets"])
+    )
     command = [
-        executable,
+        str(executable),
         "-u",
-        _pinned_target(target, address),
-        "-sni",
-        target.host,
-        "-H",
-        f"Host: {authority}",
+        target.url,
+        "-proxy",
+        f"http://127.0.0.1:{port}",
         "-jsonl",
         "-o",
         str(output),
         "-disable-update-check",
         "-no-interactsh",
-        "-tags",
-        "tech,misconfig,exposure",
-        "-exclude-tags",
-        "dos,fuzz,intrusive",
+        "-disable-redirects",
+        "-omit-raw",
+        "-omit-template",
+        "-no-stdin",
         "-rate-limit",
-        "2",
+        "1",
         "-bulk-size",
         "1",
         "-concurrency",
@@ -84,23 +72,29 @@ def _nuclei(target: NormalizedTarget, address: str, output: Path, timeout: float
         "-timeout",
         "10",
     ]
-    _run(command, output, timeout)
+    for template in templates:
+        command.extend(("-t", str(template)))
+    confined_run(command, output, timeout, port, (executable, *templates))
     findings: list[Finding] = []
     for line in output.read_text(encoding="utf-8", errors="replace").splitlines()[:500]:
         try:
             row = json.loads(line)
         except json.JSONDecodeError:
             continue
-        info = row.get("info", {}) if isinstance(row, dict) else {}
-        rule = str(row.get("template-id", "unknown"))
+        if not isinstance(row, dict):
+            raise ExternalScannerError("invalid external row")
+        info = row.get("info", {})
+        if not isinstance(info, dict):
+            raise ExternalScannerError("invalid external metadata")
+        rule = _rule(row.get("template-id", "unknown"))
         findings.append(
             Finding.create(
                 f"NUCLEI-{rule}",
                 target.url,
                 _severity(str(info.get("severity", "info"))),
-                str(info.get("name", rule))[:300],
+                "Reviewed Nuclei template observation",
                 description="Nuclei safe-template observation.",
-                evidence=str(row.get("matcher-name", "template matched"))[:1000],
+                evidence="Reviewed template matched; profile " + profile.digest,
                 recommendation="Review the referenced Nuclei template and remediate if applicable.",
                 engine="nuclei",
             )
@@ -108,20 +102,24 @@ def _nuclei(target: NormalizedTarget, address: str, output: Path, timeout: float
     return findings
 
 
-def _nikto(target: NormalizedTarget, address: str, output: Path, timeout: float) -> list[Finding]:
-    executable = shutil.which("nikto")
-    if executable is None:
-        raise ExternalScannerError("nikto executable is not installed")
+def _nikto(
+    target: NormalizedTarget, output: Path, timeout: float, profile: ExternalProfile, port: int
+) -> list[Finding]:
+    entry = profile.entry("nikto")
+    executable = verified_copy(entry, output.parent / "nikto")
+    assets = tuple(
+        verified_copy(asset, output.parent / Path(asset["path"]).name) for asset in entry["assets"]
+    )
     command = [
-        executable,
+        str(executable),
         "-host",
-        address,
-        "-vhost",
-        target.host,
-        "-port",
-        str(target.port or (443 if target.scheme == "https" else 80)),
+        target.url,
+        "-useproxy",
+        f"http://127.0.0.1:{port}",
         "-Tuning",
         "123b",
+        "-Pause",
+        "1",
         "-maxtime",
         f"{max(1, int(timeout))}s",
         "-Format",
@@ -130,9 +128,7 @@ def _nikto(target: NormalizedTarget, address: str, output: Path, timeout: float)
         str(output),
         "-nointeractive",
     ]
-    if target.scheme == "https":
-        command.append("-ssl")
-    _run(command, output, timeout + 5)
+    confined_run(command, output, timeout, port, (executable, *assets))
     try:
         document = json.loads(output.read_text(encoding="utf-8", errors="replace"))
     except (json.JSONDecodeError, OSError) as error:
@@ -140,13 +136,13 @@ def _nikto(target: NormalizedTarget, address: str, output: Path, timeout: float)
     rows = document.get("vulnerabilities", []) if isinstance(document, dict) else []
     return [
         Finding.create(
-            f"NIKTO-{row.get('id', 'observation')!s}",
+            "NIKTO-" + _rule(row.get("id", "observation")),
             target.url,
             Severity.LOW,
             "Nikto web-server observation",
-            description=str(row.get("msg", ""))[:2000],
+            description="Pinned Nikto profile observation; human validation required.",
             recommendation="Review and harden the exposed web-server behavior.",
-            evidence=str(row.get("url", "/"))[:1000],
+            evidence="Reviewed profile " + profile.digest,
             engine="nikto",
         )
         for row in rows[:500]
@@ -160,8 +156,18 @@ def scan_with_external(
     *,
     policy: AddressPolicy,
     timeout_seconds: float = 120.0,
+    profile: ExternalProfile | None = None,
+    traffic: TrafficController | None = None,
 ) -> ExternalScanResult:
     """Run selected safe profiles against one freshly validated and IP-pinned address."""
+    if profile is None:
+        return ExternalScanResult(
+            errors=("External scans require a checksum-pinned reviewed profile",)
+        )
+    if urlsplit(target.url).path != "/" or urlsplit(target.url).query:
+        return ExternalScanResult(
+            errors=("External scans require an explicitly authorized origin-root target",)
+        )
     unknown = set(scanners) - SUPPORTED_SCANNERS
     if unknown:
         raise ValueError(f"unsupported external scanner: {min(unknown)}")
@@ -170,15 +176,18 @@ def scan_with_external(
     for scanner in dict.fromkeys(scanners):
         try:
             # Resolve immediately before every process and pass only the approved literal.
-            address = resolve_allowed(target, policy)[0]
-            with tempfile.TemporaryDirectory(prefix="secman-web-check-") as directory:
+            resolve_allowed(target, policy)
+            with (
+                tempfile.TemporaryDirectory(prefix="secman-web-check-") as directory,
+                scoped_proxy(target, policy, traffic, timeout_seconds) as port,
+            ):
                 output = Path(directory) / f"{scanner}.json"
                 findings.extend(
-                    _nuclei(target, address, output, timeout_seconds)
+                    _nuclei(target, output, timeout_seconds, profile, port)
                     if scanner == "nuclei"
-                    else _nikto(target, address, output, timeout_seconds)
+                    else _nikto(target, output, timeout_seconds, profile, port)
                 )
-        except (ExternalScannerError, OSError, ValueError):
+        except (ExternalScannerError, OSError, RuntimeError, ValueError):
             errors.append(f"{scanner} scan failed")
     return ExternalScanResult(tuple(findings), tuple(errors))
 

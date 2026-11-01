@@ -37,15 +37,20 @@ reports never contain raw response bodies.
 
 Referenced JavaScript collection is an explicit opt-in. Each external `src` is fetched
 through the same per-request DNS validation and pinned connection path as the main scan;
-only its sanitized URL, HTTP status, byte count, truncation state, and SHA-256 checksum
-are retained. Script response bytes are discarded:
+only its URL, HTTP status, byte count, truncation state, and SHA-256 checksum
+are retained. Script response bytes are discarded. Additional script origins require
+`--allowed-origin`; unapproved origins leave inventory incomplete:
 
 ```bash
 uv run --locked secman-web-check scan https://example.com \
   --javascript-inventory --format all --fail-on none
 ```
 
-An optional OpenRouter system review can evaluate the sanitized scan evidence. It is
+Inventory URLs are query-redacted, and combined mode preserves script metadata.
+Reports include a versioned coverage manifest/hash, per-check execution states, evidence
+references, and analysis attribution. Review failures preserve completed scan evidence.
+
+An optional OpenRouter system review can select supported evidence references for human review. It is
 never enabled by default and does not send raw HTTP response bodies. The system prompt
 is always read from a file: the packaged `src/prompts/system-review.txt` by default, or
 a user-maintained file selected with `--llm-prompt`. Focused templates are also packaged
@@ -171,15 +176,15 @@ does not mutate the target:
 uv run --locked secman-web-check scan https://example.com --dirbuster
 ```
 
-Two external open-source scanners can also be selected individually or together. Their
-adapters use safe profiles, disable interaction/update behavior, rate-limit requests,
-revalidate DNS immediately before launch, and give the process only an approved IP
-literal while retaining the HTTP virtual host and TLS SNI. The binaries are optional and
-must already be installed. These scans are never implied by `--active`:
+Two external scanners can be selected with an exact checksum-pinned reviewed profile.
+Native macOS containment restricts child egress to the scope proxy; unsupported
+containment fails closed. Tools are optional, require reviewed read-only assets, and
+are never implied by `--active`. See [CLI.md](docs/CLI.md) for profile format and limits.
 
 ```bash
-uv run --locked secman-web-check scan https://example.com \
-  --external-scanner nuclei --external-scanner nikto --fail-on none
+uv run --locked secman-web-check scan https://example.com/ \
+  --external-scanner nuclei --external-profile reviewed-profile.json \
+  --external-profile-sha256 "$PROFILE_SHA256" --fail-on none
 ```
 
 Scan an authorized private target:
@@ -192,6 +197,40 @@ uv run --locked secman-web-check scan https://10.20.30.40 \
 This flag permits only RFC1918 IPv4 and IPv6 ULA addresses. Loopback, link-local,
 multicast, unspecified, documentation, and other special-purpose ranges remain denied.
 It does not imply `--active`.
+
+## Evidence, discovery and maintained advisories
+
+All engines share run/origin admission limits, with hard target-worker deadlines. TLS
+vulnerability probes require `--tls-vulnerabilities`; the default TLS profile inventories
+certificates/protocols. `--active` remains a separate HTTP-probe opt-in. External scanners
+now require a checksum-pinned reviewed profile and enforced native macOS containment;
+unsupported containment fails closed. See the [CLI reference](docs/CLI.md).
+
+```bash
+# Explicit read-only rendered discovery and declared API inventory
+secman-web-check scan https://example.com --browser-discovery --crawl --api-spec openapi.json
+
+# Update public vulnerability metadata separately; scans remain offline for matching
+secman-web-check intel update --package jquery --package lodash --output advisories.json
+secman-web-check scan https://example.com --advisory-db advisories.json \
+  --advisory-sha256 "$ADVISORY_SHA256" --format json
+
+# Reproduce the synthetic detection measurements without target requests
+secman-web-check evaluate tests/fixtures/detection.json --output measurements.json
+```
+
+Keep the checksum printed by the update in trusted configuration. Snapshot provenance,
+freshness and unsupported ranges are recorded. Stale snapshots mark coverage incomplete.
+Without a snapshot, the small bundled legacy catalogue remains explicitly identified.
+Browser discovery follows rendered anchors and observes fetch/XHR through the pinned
+collector; writes/session replay stay blocked. OpenAPI declarations include unexecuted
+operations and parameter names/types, without example or parameter values.
+
+MariaDB schema 4 adds a full normalized JSON archive. Export it with
+`secman-web-check history export RUN_ID --output report.json`; older history remains
+summary-only. Model observations carry evidence IDs, prompt/model/policy attribution and
+human-review status. They are included in the primary mode's non-terminal SecMan snapshot
+and never establish resolution by absence.
 
 ## Targets
 
@@ -251,7 +290,7 @@ progress bar. Reports stay on stdout and in the output directory, so piping stdo
 remains clean.
 
 `--format` is repeatable and accepts `terminal`, `json`, `sarif`, `html`, or `all`.
-Terminal is the default. JSON uses schema version `1.2`; SARIF uses version `2.1.0`;
+Terminal is the default. JSON uses schema version `1.3`; SARIF uses version `2.1.0`;
 HTML is self-contained, script-free, escaped, and protected by a restrictive CSP.
 
 `--fail-on` accepts `info`, `low`, `medium`, `high`, `critical`, or `none` and defaults
@@ -320,7 +359,8 @@ uv run --locked secman-web-check scan https://example.com --scan-mode both \
 Uploads use `/api/integrations/v1`, never fall back to legacy ingestion, and submit each
 target as an atomic snapshot. Security snapshots may include exposure and component
 inventory; visual snapshots remain finding-only. Partial or failed coverage never
-resolves older findings or components.
+resolves older findings or components. Baseline resolution additionally requires an exact
+operator-approved `SECMAN_BASELINE_PROFILE_SHA256`; other uploads remain non-terminal.
 See [SecMan integration](docs/SECMAN.md).
 
 To resolve the SecMan credentials with Proton Pass, copy the reference-only example,
@@ -369,6 +409,9 @@ mock adapters; they do not require a live target, MariaDB instance, or SecMan de
 
 ## Documentation
 
+- [CLI reference and troubleshooting](docs/CLI.md)
+- [Architecture and code guide](docs/ARCHITECTURE.md)
+- [Architecture review and capability roadmap](docs/ARCHITECTURE_REVIEW.md)
 - [Checks and severities](docs/CHECKS.md)
 - [Configuration reference](docs/CONFIGURATION.md)
 - [Safety and authorization](docs/SAFETY.md)
@@ -377,6 +420,8 @@ mock adapters; they do not require a live target, MariaDB instance, or SecMan de
 - [SecMan integration](docs/SECMAN.md)
 - [AI agent and image privacy](docs/AI_AGENT.md)
 - [Coverage matrix](docs/COVERAGE.md)
+- [Implementation status](docs/IMPLEMENTATION.md)
+- [Detection evaluation and measurements](docs/EVALUATION.md)
 
 ## Limitations
 

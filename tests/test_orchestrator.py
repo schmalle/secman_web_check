@@ -15,7 +15,7 @@ from secman_web_check.tls import TlsEvidence
 def test_batch_preserves_input_order_and_isolates_failure(monkeypatch):
     targets = (normalize_target("https://bad.example"), normalize_target("https://good.example"))
 
-    def fake_scan(target, _config):
+    def fake_scan(target, _config, **_options):
         if target.host == "bad.example":
             raise RuntimeError("secret upstream detail")
         now = datetime.now(UTC)
@@ -35,7 +35,7 @@ def test_progress_callback_reports_every_target_once_including_failures(monkeypa
         normalize_target("https://also-good.example"),
     )
 
-    def fake_scan(target, _config):
+    def fake_scan(target, _config, **_options):
         if target.host == "bad.example":
             raise RuntimeError("boom")
         now = datetime.now(UTC)

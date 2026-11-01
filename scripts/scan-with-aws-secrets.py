@@ -27,6 +27,10 @@ ALLOWED_KEYS = frozenset(
         "SECMAN_AI_API_KEY",
         "SECMAN_AI_MODEL",
         "SECMAN_AI_BASE_URL",
+        "SECMAN_BASELINE_PROFILE_SHA256",
+        "OPENROUTER_API_KEY",
+        "SECMAN_OPENROUTER_MODEL",
+        "SECMAN_OPENROUTER_BASE_URL",
     }
 )
 

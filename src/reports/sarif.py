@@ -6,8 +6,9 @@ import json
 from pathlib import Path
 from typing import Any
 
-from ..models import ScanRun, Severity
+from ..models import ScanRun, Severity, public_url
 from .common import atomic_write
+from .json_report import run_document
 
 _LEVEL = {
     Severity.INFO: "note",
@@ -38,7 +39,17 @@ def write_sarif(run: ScanRun, path: Path) -> Path:
                     "ruleId": finding.rule_id,
                     "level": _LEVEL[finding.severity],
                     "message": {"text": f"{finding.title}: {finding.evidence}"},
-                    "locations": [{"physicalLocation": {"artifactLocation": {"uri": finding.url}}}],
+                    "locations": [
+                        {"physicalLocation": {"artifactLocation": {"uri": public_url(finding.url)}}}
+                    ],
+                    "properties": {
+                        "engine": finding.engine,
+                        "model": finding.model,
+                        "validationStatus": finding.validation_status,
+                        "evidenceIds": list(finding.evidence_ids),
+                        "promptHash": finding.prompt_hash,
+                        "policyVersion": finding.policy_version,
+                    },
                     "partialFingerprints": {"externalId": finding.external_id},
                 }
             )
@@ -55,7 +66,16 @@ def write_sarif(run: ScanRun, path: Path) -> Path:
                     }
                 },
                 "results": results,
-                "properties": {"runId": run.run_id, "profile": run.profile},
+                "properties": {
+                    "runId": run.run_id,
+                    "profile": run.profile,
+                    "profileHash": run.profile_hash,
+                    "coverageManifest": run_document(run)["coverageManifest"],
+                    "targets": [
+                        {key: value for key, value in item.items() if key != "findings"}
+                        for item in run_document(run)["targets"]
+                    ],
+                },
             }
         ],
     }

@@ -38,6 +38,9 @@ def test_inventory_hashes_bytes_without_retaining_them_and_reports_safe_errors()
     )
 
     class Collector:
+        def with_allowed_origins(self, _origins):
+            return self
+
         def collect(self, target):
             if target.url.endswith("bad.js"):
                 raise CollectionError("upstream secret")
@@ -53,3 +56,31 @@ def test_inventory_hashes_bytes_without_retaining_them_and_reports_safe_errors()
 
 def test_non_html_response_has_no_references():
     assert referenced_javascript(evidence("https://example.com/data", b"{}")) == ()
+
+
+def test_script_origins_need_explicit_scope_and_collector_redirect_guard():
+    page = evidence(
+        "https://example.com/",
+        b'<script src="https://cdn.example/app.js?token=SYNTHETIC"></script>',
+        content_type="text/html",
+    )
+    calls, scopes = [], []
+
+    class Collector:
+        def with_allowed_origins(self, origins):
+            scopes.append(origins)
+            return self
+
+        def collect(self, target):
+            calls.append(target.url)
+            return (evidence(target.url, b"synthetic script"),)
+
+    denied = inventory_javascript(page, Collector())
+    assert not calls and not denied.assets and denied.errors
+    assert scopes[-1] == frozenset({"https://example.com"})
+    allowed = inventory_javascript(
+        page, Collector(), allowed_origins=frozenset({"https://cdn.example"})
+    )
+    assert len(calls) == len(allowed.assets) == 1
+    assert "SYNTHETIC" not in allowed.assets[0].url
+    assert scopes[-1] == frozenset({"https://example.com", "https://cdn.example"})

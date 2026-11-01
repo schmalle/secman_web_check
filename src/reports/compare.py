@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from hashlib import sha256
 from pathlib import Path
 from typing import Any
 
@@ -23,6 +24,9 @@ def _targets(document: dict[str, Any]) -> dict[str, dict[str, Any]]:
     for target in document["targets"]:
         if not isinstance(target, dict) or not isinstance(target.get("url"), str):
             raise TypeError("comparison input contains an invalid target")
+        coverage = target.get("coverage", {})
+        if not isinstance(coverage, dict) or not isinstance(coverage.get("executions", []), list):
+            raise TypeError("comparison input contains invalid coverage")
         url = public_url(target["url"])
         if url in result:
             raise ValueError("comparison input contains duplicate targets")
@@ -50,7 +54,18 @@ def compare_reports(old_path: Path, new_path: Path) -> dict[str, Any]:
     new = _load(new_path)
     previous = _targets(old)
     current = _targets(new)
-    profiles_match = old.get("profile") == new.get("profile") == "security:passive"
+    profiles_match = (
+        isinstance(old.get("coverageManifest"), dict)
+        and old["coverageManifest"].get("version") == 1
+        and old.get("coverageManifest") == new.get("coverageManifest")
+        and old.get("profileHash")
+        == sha256(
+            json.dumps(old["coverageManifest"], sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        and old.get("profileHash") == new.get("profileHash")
+        and old.get("profileHash") is not None
+        and old.get("profile") == new.get("profile") == "security:passive"
+    )
     introduced: set[str] = set()
     resolved: set[str] = set()
     unconfirmed: set[str] = set()
@@ -61,6 +76,44 @@ def compare_reports(old_path: Path, new_path: Path) -> dict[str, Any]:
         introduced.update(after - before)
         unchanged.update(before & after)
         missing = before - after
+        advisory = {
+            row["externalId"]
+            for row in previous.get(url, {}).get("findings", [])
+            if row.get("validationStatus", "deterministic") != "deterministic"
+            or row.get("ruleId", row["externalId"]).startswith(("LLM-", "VISUAL-"))
+        }
+        executions = {
+            (row.get("check_id"), public_url(row.get("url", url))): row.get("state")
+            for row in current.get(url, {}).get("coverage", {}).get("executions", [])
+            if isinstance(row, dict)
+        }
+        unevaluated = set()
+        for row in previous.get(url, {}).get("findings", []):
+            identifier = row["externalId"]
+            rule = row.get("ruleId", identifier.split(":", 1)[0])
+            domain = "components:advisories" if rule.startswith("WEB-COMPONENT-") else rule
+            if identifier in missing and executions.get(
+                (domain, public_url(row.get("url", url)))
+            ) not in {
+                "executed-positive",
+                "executed-negative",
+            }:
+                unevaluated.add(identifier)
+        if previous.get(url, {}).get("coverage", {}).get("queryInput") or current.get(url, {}).get(
+            "coverage", {}
+        ).get("queryInput"):
+            unevaluated.update(missing)
+        exposure = current.get(url, {}).get("exposure")
+        if isinstance(exposure, dict) and (
+            exposure.get("httpStatus") != 200
+            or exposure.get("redirectCount", 0) != 0
+            or exposure.get("configuredUrl") != exposure.get("effectiveUrl")
+        ):
+            unevaluated.update(missing)
+        unconfirmed.update(missing & unevaluated)
+        missing -= unevaluated
+        unconfirmed.update(missing & advisory)
+        missing -= advisory
         if (
             profiles_match
             and url in current
