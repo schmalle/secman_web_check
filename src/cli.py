@@ -45,7 +45,7 @@ from .secman import (
 )
 from .storage import DatabaseSettings, MariaDbStore, StorageError, connect_database
 from .system_review import ReviewOptions, default_prompt_path, load_prompt, review_run
-from .targets import NormalizedTarget, TargetError, load_targets
+from .targets import NormalizedTarget, TargetError, load_targets, normalize_target
 from .traffic import traffic_run
 from .visual import VisualOptions, merge_runs, scan_visual_all
 
@@ -59,7 +59,9 @@ app = typer.Typer(
 db_app = typer.Typer(help="Manage optional MariaDB scan history.")
 history_app = typer.Typer(help="Inspect optional MariaDB scan history.")
 intel_app = typer.Typer(help="Explicit maintained advisory snapshot updates.")
+audit_app = typer.Typer(help="Import Cloudflare security-audit-skill results.")
 app.add_typer(intel_app, name="intel")
+app.add_typer(audit_app, name="audit")
 app.add_typer(db_app, name="db")
 app.add_typer(history_app, name="history")
 console = Console()
@@ -809,6 +811,103 @@ def compare(
     for name in ("introduced", "resolved", "unconfirmedAbsent"):
         console.print(f"{name}: {len(result[name])}")
     console.print(f"unchanged: {result['unchangedCount']}")
+
+
+@audit_app.command("import")
+def audit_import(
+    findings_file: Annotated[Path, typer.Argument(help="findings.json from the audit skill.")],
+    target: Annotated[
+        str | None, typer.Option("--target", help="Deployed URL the audited code belongs to.")
+    ] = None,
+    commit_sha: Annotated[str | None, typer.Option("--commit-sha")] = None,
+    min_severity: Annotated[Severity, typer.Option("--min-severity", case_sensitive=False)] = Severity.INFO,
+    include_needs_validation: Annotated[bool, typer.Option("--include-needs-validation")] = False,
+    include_exploit_detail: Annotated[
+        bool, typer.Option("--include-exploit-detail", help="Include payloads and reproduction steps.")
+    ] = False,
+    output: Annotated[Path | None, typer.Option("--output", help="Write normalized JSON.")] = None,
+    push_to_github: Annotated[bool, typer.Option("--push-to-github")] = False,
+    github_repo: Annotated[str | None, typer.Option("--github-repo", help="owner/name")] = None,
+    allow_public_repo: Annotated[bool, typer.Option("--allow-public-repo")] = False,
+    max_issues: Annotated[int, typer.Option("--max-issues", min=1, max=100)] = 25,
+    push_to_secman: Annotated[bool, typer.Option("--push-to-secman")] = False,
+    scanner_id: Annotated[
+        int | None, typer.Option("--scanner-id", help="Defaults to SECMAN_AUDIT_SCANNER_ID.")
+    ] = None,
+) -> None:
+    """Normalize audit findings; optionally open GitHub issues and upload to SecMan.
+
+    Without --push-to-* flags this is a local dry run. GitHub issues are created first so
+    SecMan findings can link to them. Uploads never resolve older findings.
+    """
+    from .code_audit import (
+        AuditError,
+        GithubIssueClient,
+        build_audit_run_body,
+        load_audit_findings,
+        publish_github_issues,
+    )
+
+    try:
+        findings = load_audit_findings(
+            findings_file,
+            include_needs_validation=include_needs_validation,
+            min_severity=min_severity,
+            include_exploit_detail=include_exploit_detail,
+        )
+        issue_urls: dict[str, str] = {}
+        if push_to_github:
+            if not github_repo:
+                raise AuditError("--github-repo is required with --push-to-github")
+            token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN") or ""
+            with GithubIssueClient(github_repo, token) as github:
+                issue_urls = publish_github_issues(
+                    github, findings, commit_sha=commit_sha,
+                    allow_public=allow_public_repo, max_issues=max_issues,
+                )
+        if push_to_secman:
+            if not target:
+                raise AuditError("--target is required with --push-to-secman")
+            normalized = normalize_target(target)
+            sid = scanner_id if scanner_id is not None else _scanner_id_from_env("SECMAN_AUDIT_SCANNER_ID")
+            with _integration_client() as client:
+                from .secman import match_subject
+
+                subject = match_subject(client.list_subjects(sid), normalized.url)
+                if subject is None:
+                    raise SecmanIntegrationError("no authorized SecMan subject matches --target")
+                client.submit_run(
+                    build_audit_run_body(
+                        sid, subject, findings, target_url=normalized.url,
+                        commit_sha=commit_sha, issue_urls=issue_urls,
+                    )
+                )
+        if output is not None:
+            atomic_write(
+                output,
+                json.dumps([f.to_dict() | {"issueUrl": issue_urls.get(f.fingerprint)} for f in findings],
+                           indent=2, ensure_ascii=False) + "\n",
+            )
+    except (AuditError, SecmanIntegrationError, TargetError, OSError) as error:
+        error_console.print(f"[red]Audit import failed:[/red] {escape(str(error))}")
+        raise typer.Exit(2) from error
+    table = Table("Severity", "Verdict", "Location", "Title", "Issue")
+    for item in findings:
+        table.add_row(item.severity.value, item.verdict, item.location, escape(item.title),
+                      issue_urls.get(item.fingerprint, ""))
+    console.print(table)
+    console.print(f"{len(findings)} finding(s); github={'yes' if push_to_github else 'no'} "
+                  f"secman={'yes' if push_to_secman else 'no'}")
+
+
+def _scanner_id_from_env(variable: str) -> int:
+    try:
+        value = int(os.environ.get(variable, ""))
+    except ValueError as error:
+        raise SecmanIntegrationError(f"{variable} is missing or invalid") from error
+    if value < 1:
+        raise SecmanIntegrationError(f"{variable} must be a positive integer")
+    return value
 
 
 @db_app.command("install")

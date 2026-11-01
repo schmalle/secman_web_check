@@ -1,0 +1,3 @@
+interface:
+  display_name: "Cloudflare security audit import"
+  short_description: "Import security-audit-skill findings into GitHub issues and SecMan"

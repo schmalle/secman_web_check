@@ -318,6 +318,13 @@ Secrets are never accepted as CLI values or TOML settings. Vision credentials us
 `SECMAN_VISION_BASE_URL` select the model/provider. See
 [Configuration reference](docs/CONFIGURATION.md).
 
+## Code-audit import (Cloudflare security-audit-skill)
+
+`secman-web-check audit import findings.json` normalizes results from
+[cloudflare/security-audit-skill](https://github.com/cloudflare/security-audit-skill) and,
+only on explicit `--push-to-github` / `--push-to-secman`, opens deduplicated GitHub issues
+and uploads non-resolving SecMan findings. See [Code-audit import](docs/CODE_AUDIT.md).
+
 ## Optional MariaDB history
 
 MariaDB access occurs only for `db`, `history`, or a scan with `--store-db`.
