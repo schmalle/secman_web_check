@@ -163,23 +163,34 @@ def _targets_from_secman(scanner_id: int) -> tuple[NormalizedTarget, ...]:
 
 
 def _push_to_secman(
-    run: ScanRun, *, active: bool, scanner_id: int, mode: str, terminal_coverage: bool = True,
+    run: ScanRun,
+    *,
+    active: bool,
+    scanner_id: int,
+    mode: str,
+    terminal_coverage: bool = True,
     deferred: bool = False,
 ) -> None:
     from .delivery import enqueue, queue_path, synchronize
     from .integration_outbox import Outbox
     from .reports.json_report import run_document
 
-    keys = enqueue(run_document(run), scanner_id, mode if not active else "security-extended",
-                   allow_resolution=terminal_coverage and not active)
+    keys = enqueue(
+        run_document(run),
+        scanner_id,
+        mode if not active else "security-extended",
+        allow_resolution=terminal_coverage and not active,
+    )
     if deferred:
         error_console.print("SecMan delivery queued; use delivery status/retry to synchronize.")
         return
     queue = Outbox(queue_path())
     try:
         rows = synchronize(queue, _integration_client)
-        if any(row['state'] != 'delivered' for row in rows if row['id'] in keys):
-            raise SecmanIntegrationError("SecMan delivery pending or blocked; inspect delivery status")
+        if any(row["state"] != "delivered" for row in rows if row["id"] in keys):
+            raise SecmanIntegrationError(
+                "SecMan delivery pending or blocked; inspect delivery status"
+            )
     finally:
         queue.close()
 
@@ -455,7 +466,9 @@ def scan(
             "--push-to-secman", help="Submit atomic target snapshots through SecMan REST v1."
         ),
     ] = False,
-    defer_secman: Annotated[bool, typer.Option("--defer-secman", help="Queue upload without contacting SecMan.")] = False,
+    defer_secman: Annotated[
+        bool, typer.Option("--defer-secman", help="Queue upload without contacting SecMan.")
+    ] = False,
     fail_on: Annotated[
         str,
         typer.Option(
@@ -739,7 +752,11 @@ def scan(
             _write_reports(run, requested, output_dir)
             if push_to_secman:
                 _write_reports(run, ("json",), output_dir)
-            if security_run is not None and visual_run is not None and (push_to_secman or "json" in requested):
+            if (
+                security_run is not None
+                and visual_run is not None
+                and (push_to_secman or "json" in requested)
+            ):
                 write_json(security_run, output_dir / f"{run.run_id}-security.json")
                 write_json(visual_run, output_dir / f"{run.run_id}-visual.json")
             if store_db and not traffic.cancelled:
@@ -755,18 +772,29 @@ def scan(
                     error_console.print("MariaDB persistence failed; local report retained.")
             if push_to_secman and not traffic.cancelled:
                 combined = scan_mode == "both"
-                for scan_snapshot, mode in ((security_run, "security-extended" if extended else "security"), (visual_run, "visual")):
+                for scan_snapshot, mode in (
+                    (security_run, "security-extended" if extended else "security"),
+                    (visual_run, "visual"),
+                ):
                     if scan_snapshot is None:
                         continue
                     try:
                         _push_to_secman(
-                            scan_snapshot, active=scan_config.active if mode != "visual" else False,
-                            scanner_id=_scanner_id("extended" if mode == "security-extended" else mode, combined=combined),
-                            mode=mode, terminal_coverage=mode == "security", deferred=defer_secman,
+                            scan_snapshot,
+                            active=scan_config.active if mode != "visual" else False,
+                            scanner_id=_scanner_id(
+                                "extended" if mode == "security-extended" else mode,
+                                combined=combined,
+                            ),
+                            mode=mode,
+                            terminal_coverage=mode == "security",
+                            deferred=defer_secman,
                         )
                     except (SecmanIntegrationError, OSError, ValueError):
                         operational_failure = True
-                        error_console.print(f"{mode} synchronization failed; report/queue retained. Use delivery status.")
+                        error_console.print(
+                            f"{mode} synchronization failed; report/queue retained. Use delivery status."
+                        )
         except (
             AmbiguousSubject,
             OSError,
@@ -820,10 +848,13 @@ def audit_import(
         str | None, typer.Option("--target", help="Deployed URL the audited code belongs to.")
     ] = None,
     commit_sha: Annotated[str | None, typer.Option("--commit-sha")] = None,
-    min_severity: Annotated[Severity, typer.Option("--min-severity", case_sensitive=False)] = Severity.INFO,
+    min_severity: Annotated[
+        Severity, typer.Option("--min-severity", case_sensitive=False)
+    ] = Severity.INFO,
     include_needs_validation: Annotated[bool, typer.Option("--include-needs-validation")] = False,
     include_exploit_detail: Annotated[
-        bool, typer.Option("--include-exploit-detail", help="Include payloads and reproduction steps.")
+        bool,
+        typer.Option("--include-exploit-detail", help="Include payloads and reproduction steps."),
     ] = False,
     output: Annotated[Path | None, typer.Option("--output", help="Write normalized JSON.")] = None,
     push_to_github: Annotated[bool, typer.Option("--push-to-github")] = False,
@@ -862,14 +893,21 @@ def audit_import(
             token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN") or ""
             with GithubIssueClient(github_repo, token) as github:
                 issue_urls = publish_github_issues(
-                    github, findings, commit_sha=commit_sha,
-                    allow_public=allow_public_repo, max_issues=max_issues,
+                    github,
+                    findings,
+                    commit_sha=commit_sha,
+                    allow_public=allow_public_repo,
+                    max_issues=max_issues,
                 )
         if push_to_secman:
             if not target:
                 raise AuditError("--target is required with --push-to-secman")
             normalized = normalize_target(target)
-            sid = scanner_id if scanner_id is not None else _scanner_id_from_env("SECMAN_AUDIT_SCANNER_ID")
+            sid = (
+                scanner_id
+                if scanner_id is not None
+                else _scanner_id_from_env("SECMAN_AUDIT_SCANNER_ID")
+            )
             with _integration_client() as client:
                 from .secman import match_subject
 
@@ -878,26 +916,41 @@ def audit_import(
                     raise SecmanIntegrationError("no authorized SecMan subject matches --target")
                 client.submit_run(
                     build_audit_run_body(
-                        sid, subject, findings, target_url=normalized.url,
-                        commit_sha=commit_sha, issue_urls=issue_urls,
+                        sid,
+                        subject,
+                        findings,
+                        target_url=normalized.url,
+                        commit_sha=commit_sha,
+                        issue_urls=issue_urls,
                     )
                 )
         if output is not None:
             atomic_write(
                 output,
-                json.dumps([f.to_dict() | {"issueUrl": issue_urls.get(f.fingerprint)} for f in findings],
-                           indent=2, ensure_ascii=False) + "\n",
+                json.dumps(
+                    [f.to_dict() | {"issueUrl": issue_urls.get(f.fingerprint)} for f in findings],
+                    indent=2,
+                    ensure_ascii=False,
+                )
+                + "\n",
             )
     except (AuditError, SecmanIntegrationError, TargetError, OSError) as error:
         error_console.print(f"[red]Audit import failed:[/red] {escape(str(error))}")
         raise typer.Exit(2) from error
     table = Table("Severity", "Verdict", "Location", "Title", "Issue")
     for item in findings:
-        table.add_row(item.severity.value, item.verdict, item.location, escape(item.title),
-                      issue_urls.get(item.fingerprint, ""))
+        table.add_row(
+            item.severity.value,
+            item.verdict,
+            item.location,
+            escape(item.title),
+            issue_urls.get(item.fingerprint, ""),
+        )
     console.print(table)
-    console.print(f"{len(findings)} finding(s); github={'yes' if push_to_github else 'no'} "
-                  f"secman={'yes' if push_to_secman else 'no'}")
+    console.print(
+        f"{len(findings)} finding(s); github={'yes' if push_to_github else 'no'} "
+        f"secman={'yes' if push_to_secman else 'no'}"
+    )
 
 
 def _scanner_id_from_env(variable: str) -> int:
@@ -1026,8 +1079,6 @@ def history_export(
     console.print(f"JSON report: {output}")
 
 
-
-
 @app.command("delivery")
 def delivery_command(
     action: Annotated[str, typer.Argument(help="status, retry, upload, or quarantine")],
@@ -1042,7 +1093,11 @@ def delivery_command(
     from .delivery import enqueue, queue_path, synchronize
     from .integration_outbox import DeliveryError, Outbox
 
-    if action not in {"status", "retry", "upload", "quarantine"} or mode not in {"security", "security-extended", "visual"}:
+    if action not in {"status", "retry", "upload", "quarantine"} or mode not in {
+        "security",
+        "security-extended",
+        "visual",
+    }:
         raise typer.BadParameter("Choose status/retry/upload/quarantine and a supported mode")
     try:
         if action == "upload":
@@ -1063,7 +1118,11 @@ def delivery_command(
         finally:
             queue.close()
         typer.echo(json.dumps(rows))
-        if action in {"retry", "upload"} and not defer and any(row['state'] not in {'delivered', 'quarantined'} for row in rows):
+        if (
+            action in {"retry", "upload"}
+            and not defer
+            and any(row["state"] not in {"delivered", "quarantined"} for row in rows)
+        ):
             raise typer.Exit(2)
     except (DeliveryError, ValueError, OSError):
         error_console.print("Delivery failed; inspect retained queue and configuration.")

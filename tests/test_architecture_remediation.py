@@ -310,16 +310,23 @@ def test_cancelled_worker_stops_without_waiting_for_target_deadline():
 
 
 def test_secman_resolution_requires_approved_exact_profile_and_executed_nonquery_context(
-    monkeypatch, tmp_path,
+    monkeypatch,
+    tmp_path,
 ):
     from secman_web_check.cli import _push_to_secman
+    from secman_web_check.models import ExposureObservation, Reachability
     from secman_web_check.secman import IntegrationSubject
 
-    from secman_web_check.models import ExposureObservation, Reachability
     monkeypatch.setenv("SECMAN_URL", "https://secman.example.test")
     monkeypatch.setenv("SECMAN_WEB_CHECK_OUTBOX", str(tmp_path / "queue"))
-    source = run(replace(result("https://example.com/"), exposure=ExposureObservation(
-        "https://example.com/", "https://example.com/", Reachability.REACHABLE, 200, 0)))
+    source = run(
+        replace(
+            result("https://example.com/"),
+            exposure=ExposureObservation(
+                "https://example.com/", "https://example.com/", Reachability.REACHABLE, 200, 0
+            ),
+        )
+    )
     uploads = []
 
     class Client:

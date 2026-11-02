@@ -45,7 +45,13 @@ _SEVERITY = {
     "high": Severity.HIGH,
     "critical": Severity.CRITICAL,
 }
-_RANK = {Severity.INFO: 0, Severity.LOW: 1, Severity.MEDIUM: 2, Severity.HIGH: 3, Severity.CRITICAL: 4}
+_RANK = {
+    Severity.INFO: 0,
+    Severity.LOW: 1,
+    Severity.MEDIUM: 2,
+    Severity.HIGH: 3,
+    Severity.CRITICAL: 4,
+}
 _CONFIDENCE = {"low": 0.3, "medium": 0.6, "high": 0.9}
 
 
@@ -78,7 +84,8 @@ def _line_range(locations: Iterable[Mapping[str, Any]]) -> tuple[str, str | None
         {
             int(item["line"])
             for item in locations
-            if item.get("file") == first.get("file") and isinstance(item.get("line"), int)
+            if item.get("file") == first.get("file")
+            and isinstance(item.get("line"), int)
             and item["line"] > 0
         }
     )
@@ -142,12 +149,17 @@ class AuditFinding:
 
 def _describe(items: Iterable[Mapping[str, Any]]) -> tuple[str, ...]:
     return tuple(
-        _clean(f"`{_safe_path(i.get('file', ''))}:{i.get('line', '?')}` {i.get('description', '')}", 600)
+        _clean(
+            f"`{_safe_path(i.get('file', ''))}:{i.get('line', '?')}` {i.get('description', '')}",
+            600,
+        )
         for i in items
     )
 
 
-def _parse_record(record: Mapping[str, Any], index: int, *, exploit_detail: bool) -> AuditFinding | None:
+def _parse_record(
+    record: Mapping[str, Any], index: int, *, exploit_detail: bool
+) -> AuditFinding | None:
     verdict = record.get("verdict")
     if verdict == "rejected":
         return None
@@ -376,7 +388,9 @@ def publish_github_issues(
         if finding.fingerprint in urls:
             continue
         if created >= max_issues:
-            raise AuditError(f"stopped after {max_issues} new issues (--max-issues); rerun to continue")
+            raise AuditError(
+                f"stopped after {max_issues} new issues (--max-issues); rerun to continue"
+            )
         urls[finding.fingerprint] = client.create(finding, commit_sha=commit_sha)
         created += 1
     return urls

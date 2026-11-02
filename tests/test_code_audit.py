@@ -19,14 +19,25 @@ from secman_web_check.secman import IntegrationSubject
 
 def _confirmed(fp="sqli-1", severity="high"):
     return {
-        "verdict": "confirmed", "fingerprint": fp, "title": "SQL injection @admin",
-        "description": "d", "root_cause": "rc", "intended_behavior": "ib",
-        "trace": [{"kind": "sink", "file": "src/db.py", "line": 10, "scope": "f", "description": "q"}],
+        "verdict": "confirmed",
+        "fingerprint": fp,
+        "title": "SQL injection @admin",
+        "description": "d",
+        "root_cause": "rc",
+        "intended_behavior": "ib",
+        "trace": [
+            {"kind": "sink", "file": "src/db.py", "line": 10, "scope": "f", "description": "q"}
+        ],
         "evidence": [{"file": "src/db.py", "line": 12, "description": "concat"}],
-        "execution": {"attacker_perspective": "a", "payloads": ["' OR 1=1"],
-                      "instructions": ["send"], "observed_result": "dump"},
+        "execution": {
+            "attacker_perspective": "a",
+            "payloads": ["' OR 1=1"],
+            "instructions": ["send"],
+            "observed_result": "dump",
+        },
         "remediation": {"strategy": "parametrize"},
-        "severity": {"overall_severity": severity}, "confidence": {"score": "high"},
+        "severity": {"overall_severity": severity},
+        "confidence": {"score": "high"},
     }
 
 
@@ -37,9 +48,16 @@ def _write(tmp_path, records):
 
 
 def test_only_confirmed_by_default_and_rejected_never(tmp_path):
-    nv = {"verdict": "needs_validation", "fingerprint": "nv-1", "title": "t", "description": "d",
-          "claimed_root_cause": "c", "trace": _confirmed()["trace"],
-          "evidence": _confirmed()["evidence"], "blockers": ["no sandbox"]}
+    nv = {
+        "verdict": "needs_validation",
+        "fingerprint": "nv-1",
+        "title": "t",
+        "description": "d",
+        "claimed_root_cause": "c",
+        "trace": _confirmed()["trace"],
+        "evidence": _confirmed()["evidence"],
+        "blockers": ["no sandbox"],
+    }
     rej = {**nv, "verdict": "rejected", "fingerprint": "rej-1", "reason": "r"}
     path = _write(tmp_path, [_confirmed(), nv, rej])
     assert [f.fingerprint for f in load_audit_findings(path)] == ["sqli-1"]
@@ -76,12 +94,22 @@ def test_github_publish_is_idempotent_and_private_only(tmp_path, httpx_mock):
     findings = load_audit_findings(_write(tmp_path, [_confirmed("a"), _confirmed("b")]))
     httpx_mock.add_response(url="https://api.github.com/repos/o/r", json={"private": True})
     httpx_mock.add_response(
-        url=httpx.URL("https://api.github.com/repos/o/r/issues",
-                      params={"state": "all", "labels": "security-audit", "per_page": 100, "page": 1}),
-        json=[{"body": "<!-- secman-web-check:audit:a -->", "html_url": "https://github.com/o/r/issues/1"}],
+        url=httpx.URL(
+            "https://api.github.com/repos/o/r/issues",
+            params={"state": "all", "labels": "security-audit", "per_page": 100, "page": 1},
+        ),
+        json=[
+            {
+                "body": "<!-- secman-web-check:audit:a -->",
+                "html_url": "https://github.com/o/r/issues/1",
+            }
+        ],
     )
-    httpx_mock.add_response(method="POST", url="https://api.github.com/repos/o/r/issues",
-                            json={"html_url": "https://github.com/o/r/issues/2"})
+    httpx_mock.add_response(
+        method="POST",
+        url="https://api.github.com/repos/o/r/issues",
+        json={"html_url": "https://github.com/o/r/issues/2"},
+    )
     with GithubIssueClient("o/r", "tok") as client:
         urls = publish_github_issues(client, findings)
     assert urls == {"a": "https://github.com/o/r/issues/1", "b": "https://github.com/o/r/issues/2"}
@@ -98,15 +126,29 @@ def test_public_repo_refused(tmp_path, httpx_mock):
 def test_secman_body_never_claims_complete_coverage(tmp_path):
     findings = load_audit_findings(_write(tmp_path, [_confirmed()]))
     subject = IntegrationSubject(1, 9, 3, "example.com", "https://example.com/")
-    body = build_audit_run_body(9, subject, findings, target_url="https://example.com/",
-                                commit_sha="abc", issue_urls={"sqli-1": "https://github.com/o/r/issues/1"})
+    body = build_audit_run_body(
+        9,
+        subject,
+        findings,
+        target_url="https://example.com/",
+        commit_sha="abc",
+        issue_urls={"sqli-1": "https://github.com/o/r/issues/1"},
+    )
     assert body["completeCoverage"] is False
     item = body["findings"][0]
     assert (item["filePath"], item["lineRange"], item["commitSha"]) == ("src/db.py", "10", "abc")
     assert item["issueUrl"].endswith("/issues/1")
-    assert body["runKey"] == build_audit_run_body(
-        9, subject, findings, target_url="https://example.com/", commit_sha="abc",
-        issue_urls={"sqli-1": "https://github.com/o/r/issues/1"})["runKey"]
+    assert (
+        body["runKey"]
+        == build_audit_run_body(
+            9,
+            subject,
+            findings,
+            target_url="https://example.com/",
+            commit_sha="abc",
+            issue_urls={"sqli-1": "https://github.com/o/r/issues/1"},
+        )["runKey"]
+    )
 
 
 def test_cli_dry_run(tmp_path):

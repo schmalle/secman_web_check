@@ -230,7 +230,9 @@ def test_csv_scan_can_submit_results_directly_to_secman(monkeypatch, tmp_path):
     monkeypatch.setattr("secman_web_check.cli.scan_all", clean_run)
     monkeypatch.setattr(
         "secman_web_check.cli._push_to_secman",
-        lambda run, *, active, scanner_id, mode, **kwargs: uploads.append((run, active, scanner_id, mode)),
+        lambda run, *, active, scanner_id, mode, **kwargs: uploads.append(
+            (run, active, scanner_id, mode)
+        ),
     )
     monkeypatch.setenv("SECMAN_SCANNER_ID", "42")
 

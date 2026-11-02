@@ -147,7 +147,9 @@ def _exposure_body(exposure: ExposureObservation) -> dict[str, Any]:
     return {
         "configuredUrl": exposure.configured_url,
         "effectiveUrl": exposure.effective_url,
-        "reachability": "REACHABLE" if exposure.reachability.value == "AUTHENTICATED" else exposure.reachability.value,
+        "reachability": "REACHABLE"
+        if exposure.reachability.value == "AUTHENTICATED"
+        else exposure.reachability.value,
         "httpStatus": exposure.http_status,
         "redirectCount": exposure.redirect_count,
         "vantagePoint": exposure.vantage_point,
@@ -287,7 +289,9 @@ class IntegrationClient:
                     params={"page": page, "size": size},
                 )
             except httpx.HTTPError as error:
-                raise SecmanIntegrationError("SecMan subject discovery request failed", True) from error
+                raise SecmanIntegrationError(
+                    "SecMan subject discovery request failed", True
+                ) from error
             if response.status_code != 200:
                 raise SecmanIntegrationError(
                     f"SecMan subject discovery failed with HTTP {response.status_code}"
@@ -311,13 +315,18 @@ class IntegrationClient:
             raise SecmanIntegrationError("SecMan run submission request failed", True) from error
         if response.status_code not in {200, 201}:
             raise SecmanIntegrationError(
-                f"http_{response.status_code}", response.status_code in {408, 429} or response.status_code >= 500,
-                float(response.headers.get("Retry-After", "0")) if response.headers.get("Retry-After", "0").isdigit() else 0
+                f"http_{response.status_code}",
+                response.status_code in {408, 429} or response.status_code >= 500,
+                float(response.headers.get("Retry-After", "0"))
+                if response.headers.get("Retry-After", "0").isdigit()
+                else 0,
             )
         try:
             payload = response.json()
         except ValueError as error:
-            raise SecmanIntegrationError("SecMan run submission returned invalid JSON", True) from error
+            raise SecmanIntegrationError(
+                "SecMan run submission returned invalid JSON", True
+            ) from error
         if not isinstance(payload, dict):
             raise SecmanIntegrationError("SecMan run submission returned an invalid response")
         return payload
