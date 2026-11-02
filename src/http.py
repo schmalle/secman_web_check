@@ -5,9 +5,11 @@ from __future__ import annotations
 import ipaddress
 import socket
 import ssl
+import threading
 from collections.abc import Callable, Iterable, Mapping
+from contextlib import nullcontext
 from dataclasses import dataclass, replace
-from time import monotonic
+from time import monotonic, sleep
 from urllib.parse import urljoin, urlsplit, urlunsplit
 
 import httpcore
@@ -24,6 +26,12 @@ from .targets import (
     normalize_target,
     resolve_allowed,
 )
+from .traffic import TrafficController
+
+
+def target_origin(target: NormalizedTarget) -> str:
+    return f"{target.scheme}://{target.host}:{target.port or (443 if target.scheme == 'https' else 80)}"
+
 
 _REDIRECTS = {301, 302, 303, 307, 308}
 _SAFE_HEADERS = {"accept", "accept-language", "origin", "cache-control", "pragma"}
@@ -32,6 +40,42 @@ _METHODS = {"GET", "HEAD", "OPTIONS", "TRACE"}
 
 class CollectionError(RuntimeError):
     """A safe-to-report collection failure, without upstream exception details."""
+
+
+class RequestBudget:
+    """Count every HTTP hop and pace requests by origin across a target scan."""
+
+    def __init__(self, max_requests: int, requests_per_second: float) -> None:
+        if max_requests < 1 or requests_per_second <= 0:
+            raise ValueError("Request budget limits must be positive")
+        self.max_requests = max_requests
+        self.requests_per_second = requests_per_second
+        self._count = 0
+        self._next_by_origin: dict[str, float] = {}
+        self._lock = threading.Lock()
+
+    @property
+    def count(self) -> int:
+        with self._lock:
+            return self._count
+
+    def claim(self, target: NormalizedTarget, deadline: float | None = None) -> None:
+        authority = f"[{target.host}]" if ":" in target.host else target.host
+        if target.port is not None:
+            authority += f":{target.port}"
+        key = f"{target.scheme}://{authority}"
+        with self._lock:
+            if self._count >= self.max_requests:
+                raise CollectionError("HTTP request budget reached")
+            now = monotonic()
+            scheduled = max(now, self._next_by_origin.get(key, now))
+            self._next_by_origin[key] = scheduled + 1.0 / self.requests_per_second
+            self._count += 1
+        remaining = scheduled - monotonic()
+        if deadline is not None and scheduled >= deadline:
+            raise CollectionError("HTTP deadline exceeded during request pacing")
+        if remaining > 0:
+            sleep(remaining)
 
 
 @dataclass(frozen=True, slots=True)
@@ -65,7 +109,9 @@ class PinnedNetworkBackend(NetworkBackend):
         target: NormalizedTarget,
         addresses: tuple[str, ...],
         backend: NetworkBackend | None = None,
+        deadline: float | None = None,
     ) -> None:
+        self._deadline = deadline
         self._host = target.host
         self._port = target.port or (443 if target.scheme == "https" else 80)
         # Literal-only inputs prevent the delegated backend from resolving a hostname.
@@ -88,13 +134,20 @@ class PinnedNetworkBackend(NetworkBackend):
         if host != self._host or port != self._port or local_address is not None:
             raise AddressDenied("Connection does not match the approved target")
         deadline = None if timeout is None else monotonic() + timeout
+        if self._deadline is not None:
+            deadline = min(deadline, self._deadline) if deadline is not None else self._deadline
         for address in self._addresses:
             remaining = None if deadline is None else max(0.0, deadline - monotonic())
             if remaining == 0:
                 raise httpcore.ConnectTimeout("Approved connection timed out") from None
             try:
-                return self._backend.connect_tcp(
+                stream = self._backend.connect_tcp(
                     address, port, timeout=remaining, socket_options=socket_options
+                )
+                return (
+                    _DeadlineStream(stream, self._deadline)
+                    if self._deadline is not None
+                    else stream
                 )
             except (httpcore.ConnectError, httpcore.ConnectTimeout):
                 # Only a member of this already-validated DNS snapshot may be tried next.
@@ -110,6 +163,48 @@ class PinnedNetworkBackend(NetworkBackend):
         raise AddressDenied("Unix socket connections are not permitted")
 
 
+class _DeadlineStream(NetworkStream):
+    """Bound all socket operations, including header reads, by one monotonic deadline."""
+
+    def __init__(self, stream: NetworkStream, deadline: float) -> None:
+        self.stream = stream
+        self.deadline = deadline
+
+    def _remaining(self, timeout: float | None) -> float:
+        remaining = self.deadline - monotonic()
+        if remaining <= 0:
+            raise httpcore.ReadTimeout("HTTP deadline exceeded")
+        return min(timeout, remaining) if timeout is not None else remaining
+
+    def read(self, max_bytes: int, timeout: float | None = None) -> bytes:
+        result = self.stream.read(max_bytes, timeout=self._remaining(timeout))
+        self._remaining(timeout)
+        return result
+
+    def write(self, buffer: bytes, timeout: float | None = None) -> None:
+        self.stream.write(buffer, timeout=self._remaining(timeout))
+        self._remaining(timeout)
+
+    def start_tls(
+        self,
+        ssl_context: ssl.SSLContext,
+        server_hostname: str | None = None,
+        timeout: float | None = None,
+    ) -> NetworkStream:
+        stream = self.stream.start_tls(
+            ssl_context, server_hostname, timeout=self._remaining(timeout)
+        )
+        self.stream = stream
+        self._remaining(timeout)
+        return self
+
+    def close(self) -> None:
+        self.stream.close()
+
+    def get_extra_info(self, info: str) -> object:
+        return self.stream.get_extra_info(info)
+
+
 class _PinnedTransport(httpx.HTTPTransport):
     def __init__(self, backend: PinnedNetworkBackend) -> None:
         # HTTPX 0.27's transport adapter uses this pool for request/response conversion.
@@ -121,6 +216,13 @@ class _PinnedTransport(httpx.HTTPTransport):
             retries=0,
             network_backend=backend,
         )
+
+
+def pinned_transport(
+    target: NormalizedTarget, addresses: tuple[str, ...], *, deadline: float | None = None
+) -> httpx.HTTPTransport:
+    """Build a verified synchronous transport that can dial only approved IP literals."""
+    return _PinnedTransport(PinnedNetworkBackend(target, addresses, deadline=deadline))
 
 
 class _SingleHopClient(httpx.Client):
@@ -194,18 +296,124 @@ class HttpCollector:
         *,
         resolver: Callable[..., object] = socket.getaddrinfo,
         network_backend: NetworkBackend | None = None,
+        allowed_origins: frozenset[str] | None = None,
+        budget: RequestBudget | None = None,
+        deadline: float | None = None,
+        traffic: TrafficController | None = None,
     ) -> None:
+        self.traffic = traffic
         self.config = config if config is not None else ScannerConfig()
         self._policy = AddressPolicy.from_config(self.config)
         self._resolver = resolver
         self._network_backend = network_backend
+        self._allowed_origins = allowed_origins
+        self._budget = budget
+        self._deadline = deadline
+
+    def with_deadline(self, deadline: float) -> HttpCollector:
+        return HttpCollector(
+            self.config,
+            resolver=self._resolver,
+            network_backend=self._network_backend,
+            allowed_origins=self._allowed_origins,
+            budget=self._budget,
+            traffic=self.traffic,
+            deadline=min(deadline, self._deadline) if self._deadline else deadline,
+        )
+
+    @property
+    def request_count(self) -> int:
+        return self._budget.count if self._budget is not None else 0
+
+    def with_budget(self, budget: RequestBudget) -> HttpCollector:
+        return HttpCollector(
+            self.config,
+            resolver=self._resolver,
+            network_backend=self._network_backend,
+            allowed_origins=self._allowed_origins,
+            budget=budget,
+            traffic=self.traffic,
+            deadline=self._deadline,
+        )
 
     def with_max_body_bytes(self, max_body_bytes: int) -> HttpCollector:
         return HttpCollector(
             replace(self.config, max_body_bytes=max_body_bytes),
             resolver=self._resolver,
             network_backend=self._network_backend,
+            allowed_origins=self._allowed_origins,
+            budget=self._budget,
+            traffic=self.traffic,
+            deadline=self._deadline,
         )
+
+    def with_max_redirects(self, max_redirects: int) -> HttpCollector:
+        return HttpCollector(
+            replace(self.config, max_redirects=max_redirects),
+            resolver=self._resolver,
+            network_backend=self._network_backend,
+            allowed_origins=self._allowed_origins,
+            budget=self._budget,
+            traffic=self.traffic,
+            deadline=self._deadline,
+        )
+
+    def with_allowed_origins(self, allowed_origins: frozenset[str]) -> HttpCollector:
+        return HttpCollector(
+            self.config,
+            resolver=self._resolver,
+            network_backend=self._network_backend,
+            allowed_origins=allowed_origins,
+            budget=self._budget,
+            traffic=self.traffic,
+            deadline=self._deadline,
+        )
+
+    def _check_origin(self, target: NormalizedTarget) -> None:
+        if self._allowed_origins is None:
+            return
+        authority = f"[{target.host}]" if ":" in target.host else target.host
+        if target.port is not None:
+            authority += f":{target.port}"
+        if f"{target.scheme}://{authority}" not in self._allowed_origins:
+            raise AddressDenied("Target origin denied by policy")
+
+    def collect_one(
+        self, target: NormalizedTarget, method: str = "GET"
+    ) -> tuple[HttpResponseEvidence, str | None]:
+        """Fetch one pinned hop for browser interception; validate a redirect before release."""
+        if method not in {"GET", "HEAD"}:
+            raise CollectionError("Browser request method is not permitted")
+        deadline = min(
+            monotonic() + self.config.request_timeout_seconds, self._deadline or float("inf")
+        )
+        try:
+            current = normalize_target(target.url)
+            self._check_origin(current)
+            addresses = resolve_allowed(current, self._policy, self._resolver)
+            if self._budget is not None:
+                self._budget.claim(current, deadline)
+            evidence, location = self._request(
+                current,
+                addresses,
+                method,
+                {"Accept-Encoding": "identity", "User-Agent": "secman-web-check/0.1"},
+                deadline,
+            )
+            if evidence.truncated:
+                raise CollectionError("Browser response exceeded the size limit")
+            if evidence.status_code not in _REDIRECTS:
+                return evidence, None
+            if not location:
+                raise CollectionError("Browser redirect is missing or ambiguous")
+            destination = _redirect_target(current.url, location)
+            self._check_origin(destination)
+            if current.scheme == "https" and destination.scheme == "http":
+                raise CollectionError("Browser redirect downgraded to HTTP")
+            resolve_allowed(destination, self._policy, self._resolver)
+            return evidence, destination.url
+        except (AddressDenied, TargetError, httpx.HTTPError, OSError, ValueError):
+            raise CollectionError("Browser request denied or failed") from None
 
     def collect(
         self,
@@ -225,11 +433,19 @@ class HttpCollector:
             raise CollectionError("Request header value is invalid")
         safe_headers.update({"Accept-Encoding": "identity", "User-Agent": "secman-web-check/0.1"})
         results: list[HttpResponseEvidence] = []
+        deadline = min(
+            monotonic() + self.config.request_timeout_seconds, self._deadline or float("inf")
+        )
         try:
             current = normalize_target(target.url)
             while True:
+                self._check_origin(current)
                 addresses = resolve_allowed(current, self._policy, self._resolver)
-                evidence, location = self._request(current, addresses, method, safe_headers)
+                if self._budget is not None:
+                    self._budget.claim(current, deadline)
+                evidence, location = self._request(
+                    current, addresses, method, safe_headers, deadline
+                )
                 if evidence.status_code not in _REDIRECTS:
                     results.append(evidence)
                     return tuple(results)
@@ -244,7 +460,12 @@ class HttpCollector:
                 if destination is not None:
                     if current.scheme == "https" and destination.scheme == "http":
                         reason = "HTTPS downgrade"
-                    elif len(results) >= self.config.max_redirects:
+                    elif self._allowed_origins is not None:
+                        try:
+                            self._check_origin(destination)
+                        except AddressDenied:
+                            reason = "Redirect origin denied by policy"
+                    if reason is None and len(results) >= self.config.max_redirects:
                         reason = "Redirect limit reached"
                 evidence = replace(
                     evidence,
@@ -268,8 +489,15 @@ class HttpCollector:
         addresses: tuple[str, ...],
         method: str,
         headers: Mapping[str, str],
+        deadline: float | None = None,
     ) -> tuple[HttpResponseEvidence, str | None]:
-        backend = PinnedNetworkBackend(target, addresses, self._network_backend)
+        deadline = min(
+            deadline or monotonic() + self.config.request_timeout_seconds,
+            self._deadline or float("inf"),
+        )
+        if monotonic() >= deadline:
+            raise CollectionError("HTTP deadline exceeded")
+        backend = PinnedNetworkBackend(target, addresses, self._network_backend, deadline)
         timeout = httpx.Timeout(
             connect=self.config.connect_timeout_seconds,
             read=self.config.read_timeout_seconds,
@@ -279,6 +507,9 @@ class HttpCollector:
         started = monotonic()
         # A new client per hop prevents both cookie replay and connection reuse across DNS checks.
         with (
+            self.traffic.admit(target_origin(target), "http", deadline)
+            if self.traffic
+            else nullcontext(),
             _SingleHopClient(
                 transport=_PinnedTransport(backend),
                 timeout=timeout,

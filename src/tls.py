@@ -21,6 +21,8 @@ from .checks.registry import RULES
 from .config import ScannerConfig
 from .models import Finding
 from .targets import AddressPolicy, NormalizedTarget, resolve_allowed
+from .tls_transport import tls_connections
+from .traffic import TrafficController
 
 
 @dataclass(frozen=True, slots=True)
@@ -29,7 +31,7 @@ class TlsEvidence:
     errors: tuple[str, ...] = ()
 
 
-_COMMANDS = {
+_INVENTORY_COMMANDS = {
     ScanCommand.CERTIFICATE_INFO,
     ScanCommand.SSL_2_0_CIPHER_SUITES,
     ScanCommand.SSL_3_0_CIPHER_SUITES,
@@ -38,6 +40,8 @@ _COMMANDS = {
     ScanCommand.TLS_1_2_CIPHER_SUITES,
     ScanCommand.TLS_1_3_CIPHER_SUITES,
     ScanCommand.TLS_COMPRESSION,
+}
+_VULNERABILITY_COMMANDS = {
     ScanCommand.OPENSSL_CCS_INJECTION,
     ScanCommand.TLS_FALLBACK_SCSV,
     ScanCommand.HEARTBLEED,
@@ -60,10 +64,27 @@ def _finding(rule_id: str, target: NormalizedTarget, evidence: str) -> Finding:
     )
 
 
+def _trace_summary(trace: Any) -> str | None:
+    if trace is None:
+        return None
+    summary = "".join(trace.format_exception_only()).strip()
+    return summary or None
+
+
+def _connectivity_error(result: Any) -> str:
+    detail = _trace_summary(result.connectivity_error_trace)
+    if detail is None:
+        return "TLS connectivity failed"
+    return f"TLS connectivity failed: {detail}"
+
+
 class TlsScanner:
     """Run a bounded SSLyze scan against an already policy-approved IP."""
 
-    def __init__(self, config: ScannerConfig | None = None) -> None:
+    def __init__(
+        self, config: ScannerConfig | None = None, *, traffic: TrafficController | None = None
+    ) -> None:
+        self.traffic = traffic
         self.config = config if config is not None else ScannerConfig()
 
     def scan(self, target: NormalizedTarget) -> tuple[TlsEvidence, tuple[Finding, ...]]:
@@ -79,27 +100,30 @@ class TlsScanner:
             tls_server_name_indication=target.host,
             http_user_agent="secman-web-check/0.1",
             network_timeout=max(1, math.ceil(self.config.connect_timeout_seconds)),
-            network_max_retries=0,
+            network_max_retries=3,
         )
-        with warnings.catch_warnings():
+        with tls_connections(target, self.config, self.traffic), warnings.catch_warnings():
             warnings.filterwarnings(
                 "ignore",
                 message="Parsed a serial number which wasn't positive.*",
                 category=Warning,
             )
             scanner = Scanner(
-                per_server_concurrent_connections_limit=2, concurrent_server_scans_limit=1
+                per_server_concurrent_connections_limit=1, concurrent_server_scans_limit=1
             )
             scanner.queue_scans(
                 [
                     ServerScanRequest(
-                        location, network_configuration=network, scan_commands=_COMMANDS
+                        location,
+                        network_configuration=network,
+                        scan_commands=_INVENTORY_COMMANDS
+                        | (_VULNERABILITY_COMMANDS if self.config.tls_vulnerabilities else set()),
                     )
                 ]
             )
             result = next(scanner.get_results())
         if result.scan_result is None:
-            return TlsEvidence(False, ("TLS connectivity failed",)), ()
+            return TlsEvidence(False, (_connectivity_error(result),)), ()
         return self._translate(target, result.scan_result)
 
     def _translate(
@@ -110,6 +134,14 @@ class TlsScanner:
         results: dict[str, Any | None] = {}
 
         def completed(name: str) -> Any | None:
+            if not self.config.tls_vulnerabilities and name in {
+                "openssl_ccs_injection",
+                "tls_fallback_scsv",
+                "heartbleed",
+                "robot",
+                "session_renegotiation",
+            }:
+                return None
             if name in results:
                 return results[name]
             attempt = getattr(attempts, name)
@@ -117,7 +149,14 @@ class TlsScanner:
                 attempt.status is not ScanCommandAttemptStatusEnum.COMPLETED
                 or attempt.result is None
             ):
-                errors.append(f"TLS capability {name} was incomplete")
+                reason = getattr(attempt, "error_reason", None)
+                detail = _trace_summary(getattr(attempt, "error_trace", None)) or (
+                    reason.name.lower().replace("_", " ") if reason is not None else None
+                )
+                message = f"TLS capability {name} was incomplete"
+                if detail:
+                    message = f"{message}: {detail}"
+                errors.append(message)
                 results[name] = None
                 return None
             results[name] = attempt.result

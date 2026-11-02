@@ -34,15 +34,22 @@ ACTIVE_PROBES = (
     ActiveProbe("WEB-ACTIVE-GIT-EXPOSED", "GET", "/.git/HEAD"),
     ActiveProbe("WEB-ACTIVE-SERVER-STATUS-EXPOSED", "GET", "/server-status"),
     ActiveProbe("WEB-ACTIVE-CONFIG-BACKUP-EXPOSED", "GET", "/wp-config.php.bak"),
+    ActiveProbe("WEB-ACTIVE-OPEN-REDIRECT", "GET", "/?next=https%3A%2F%2Fscanner.invalid%2F"),
 )
 
 
 def _probe_url(base_url: str, path: str) -> str:
     parts = urlsplit(base_url)
-    return urlunsplit((parts.scheme, parts.netloc, path, "", ""))
+    probe = urlsplit(path)
+    return urlunsplit((parts.scheme, parts.netloc, probe.path, probe.query, ""))
 
 
 def _matches(probe: ActiveProbe, response: HttpResponseEvidence) -> bool:
+    if probe.rule_id == "WEB-ACTIVE-OPEN-REDIRECT":
+        return (
+            response.status_code in {301, 302, 303, 307, 308}
+            and response.redirect_url == "https://scanner.invalid/"
+        )
     if response.status_code != 200 or response.truncated:
         return False
     text = response.body.decode("utf-8", errors="replace")[: probe.max_body_bytes]
@@ -69,6 +76,7 @@ def run_active_checks(
     collector: HttpCollector,
     *,
     enabled: bool,
+    selected: frozenset[str] | None = None,
 ) -> ActiveCheckResult:
     """Run only the fixed catalogue when explicitly enabled."""
     if not enabled:
@@ -76,6 +84,8 @@ def run_active_checks(
     findings: list[Finding] = []
     errors: list[str] = []
     for probe in ACTIVE_PROBES:
+        if selected is not None and probe.rule_id not in selected:
+            continue
         headers = {} if probe.origin is None else {"Origin": probe.origin}
         try:
             responses = collector.with_max_body_bytes(probe.max_body_bytes).collect(

@@ -51,6 +51,55 @@ def test_header_rules(headers, rule):
     assert rule in {finding.rule_id for finding in check_headers(context(headers))}
 
 
+@pytest.mark.parametrize(
+    ("header", "value", "technology"),
+    [
+        ("X-Powered-By", "PHP/8.3.12", "PHP 8.3.12"),
+        ("x-PoWeReD-bY", "php", "PHP"),
+        ("Server", "Apache/2.4.62 (Unix) PHP/8.2.24", "PHP 8.2.24"),
+        ("Server", "PHP", "PHP"),
+        ("X-Powered-By", "ASP.NET", "ASP.NET"),
+        ("X-Powered-By", "Express", "Express"),
+        ("X-AspNet-Version", "4.0.30319", "ASP.NET 4.0.30319"),
+        ("X-AspNetMvc-Version", "5.2", "ASP.NET MVC 5.2"),
+    ],
+)
+def test_disclosure_identifies_advertised_technology(header, value, technology):
+    findings = check_headers(context(((header, value),), content_type="application/json"))
+    finding = next(f for f in findings if f.rule_id == "WEB-HEADER-DISCLOSURE")
+    assert f"advertised technologies: {technology}" in finding.evidence
+
+
+@pytest.mark.parametrize("value", ["PHPMyAdmin", "NotPHP", "PHP-secret", "Expressive"])
+def test_disclosure_does_not_infer_technology_from_partial_names(value):
+    findings = check_headers(context((("X-Powered-By", value),)))
+    finding = next(f for f in findings if f.rule_id == "WEB-HEADER-DISCLOSURE")
+    assert "advertised technologies" not in finding.evidence
+
+
+def test_technology_evidence_deduplicates_and_omits_unrecognized_header_contents():
+    findings = check_headers(
+        context(
+            (
+                ("X-Powered-By", "PHP/8.3.12, Express; secret=private"),
+                ("x-powered-by", "PHP/8.3.12"),
+                ("X-AspNet-Version", "private"),
+            )
+        )
+    )
+    finding = next(f for f in findings if f.rule_id == "WEB-HEADER-DISCLOSURE")
+    assert "advertised technologies: ASP.NET, Express, PHP 8.3.12" in finding.evidence
+    assert finding.evidence.count("PHP 8.3.12") == 1
+    assert "private" not in finding.evidence
+
+
+def test_php_is_not_inferred_from_unrelated_headers_or_body():
+    assert not any(
+        f.rule_id == "WEB-HEADER-DISCLOSURE"
+        for f in check_headers(context((("X-Custom", "PHP/8.3.12"),)))
+    )
+
+
 def test_restrictive_headers_avoid_findings():
     headers = (
         ("Strict-Transport-Security", "max-age=31536000; includeSubDomains"),

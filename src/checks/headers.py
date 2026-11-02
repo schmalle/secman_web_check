@@ -8,6 +8,48 @@ from urllib.parse import urlsplit
 from ..models import Finding
 from .registry import RULES, CheckContext
 
+_TECHNOLOGY_SIGNATURES = (
+    (
+        "PHP",
+        re.compile(r"(?:^|[\s,;(])PHP(?:/([0-9]+(?:\.[0-9]+){0,3}))?(?=$|[\s,;)])", re.IGNORECASE),
+    ),
+    (
+        "ASP.NET",
+        re.compile(
+            r"(?:^|[\s,;(])ASP\.NET(?:/([0-9]+(?:\.[0-9]+){0,3}))?(?=$|[\s,;)])", re.IGNORECASE
+        ),
+    ),
+    (
+        "Express",
+        re.compile(
+            r"(?:^|[\s,;(])Express(?:/([0-9]+(?:\.[0-9]+){0,3}))?(?=$|[\s,;)])", re.IGNORECASE
+        ),
+    ),
+)
+
+
+def _advertised_technologies(context: CheckContext) -> tuple[str, ...]:
+    """Return known header signatures, never arbitrary header contents."""
+    detected: set[str] = set()
+    for header in ("server", "x-powered-by"):
+        for value in context.header_values(header):
+            for name, signature in _TECHNOLOGY_SIGNATURES:
+                for match in signature.finditer(value):
+                    version = match.group(1)
+                    # Keep evidence bounded even for attacker-controlled numeric banners.
+                    detected.add(f"{name} {version}" if version and len(version) <= 32 else name)
+    for header, name in (
+        ("x-aspnet-version", "ASP.NET"),
+        ("x-aspnetmvc-version", "ASP.NET MVC"),
+    ):
+        for value in context.header_values(header):
+            version = value.strip()
+            if len(version) <= 32 and re.fullmatch(r"[0-9]+(?:\.[0-9]+){0,3}", version):
+                detected.add(f"{name} {version}")
+            else:
+                detected.add(name)
+    return tuple(sorted(detected))
+
 
 def _directives(policy: str) -> dict[str, tuple[str, ...]]:
     directives: dict[str, tuple[str, ...]] = {}
@@ -149,6 +191,16 @@ def check_headers(context: CheckContext) -> tuple[Finding, ...]:
     ]
     if any(re.search(r"/\s*\d", value) for value in values("server")):
         disclosed.append("server")
+    technologies = _advertised_technologies(context)
+    if "server" not in disclosed and any(
+        signature.search(value)
+        for value in values("server")
+        for _, signature in _TECHNOLOGY_SIGNATURES
+    ):
+        disclosed.append("server")
     if disclosed:
-        add("DISCLOSURE", "Technology disclosure headers: " + ", ".join(disclosed))
+        evidence = "Technology disclosure headers: " + ", ".join(disclosed)
+        if technologies:
+            evidence += "; advertised technologies: " + ", ".join(technologies)
+        add("DISCLOSURE", evidence)
     return tuple(findings)

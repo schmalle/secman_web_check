@@ -12,6 +12,25 @@ from ..models import Finding
 from .registry import RULES, CheckContext
 
 
+def _has_private_key(text: str) -> bool:
+    # Delimiters have fixed alternatives; each segment is examined at most once.
+    markers = re.finditer(
+        r"-----(BEGIN|END) ((?:RSA |EC |OPENSSH |ENCRYPTED )?PRIVATE KEY)-----", text
+    )
+    openings: dict[str, int] = {}
+    for marker in markers:
+        kind, label = marker.groups()
+        if kind == "BEGIN":
+            start = marker.end()
+            if start < len(text) and text[start].isspace():
+                openings.setdefault(label, start)
+        else:
+            material_start = openings.pop(label, None)
+            if material_start is not None and text[material_start : marker.start()].strip():
+                return True
+    return False
+
+
 def _scheme(base: str, reference: str) -> str:
     try:
         return urlsplit(urljoin(base, reference.strip())).scheme.lower()
@@ -217,11 +236,7 @@ def check_content(context: CheckContext) -> tuple[Finding, ...]:
         _has_internal_address(value) for value in context.header_values("location")
     ):
         add("INTERNAL-ADDRESS", "Private/local IP literal in URL or explicit address field")
-    if re.search(
-        r"-----BEGIN ((?:RSA |EC |OPENSSH |ENCRYPTED )?PRIVATE KEY)-----"
-        r"\s+\S[\s\S]+?-----END \1-----",
-        text,
-    ):
+    if _has_private_key(text):
         add("SECRET", "Matching PEM private key delimiters enclosing material; value redacted")
     findings.extend(_security_txt(context))
     return tuple(findings)

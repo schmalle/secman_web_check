@@ -1,6 +1,6 @@
 [scan]
 # Conservative defaults. These settings never enable active or private scanning.
-concurrency = 4
+concurrency = 20
 active = false
 allow_private_targets = false
 max_body_bytes = 1048576

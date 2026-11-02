@@ -1,9 +1,19 @@
+from dataclasses import replace
 from datetime import UTC, datetime
 
 import httpx
 import pytest
 
-from secman_web_check.models import Finding, Severity, TargetResult, TargetStatus
+from secman_web_check.models import (
+    ComponentCategory,
+    DetectedComponent,
+    ExposureObservation,
+    Finding,
+    Reachability,
+    Severity,
+    TargetResult,
+    TargetStatus,
+)
 from secman_web_check.secman import (
     AmbiguousSubject,
     IntegrationClient,
@@ -11,6 +21,7 @@ from secman_web_check.secman import (
     SecmanIntegrationError,
     build_run_body,
     match_subject,
+    targets_from_subjects,
     validate_base_url,
 )
 from secman_web_check.targets import normalize_target
@@ -48,6 +59,68 @@ def test_build_run_body_uses_the_shared_v1_contract() -> None:
     assert body["findings"][0]["externalId"].startswith("WEB-HSTS-001:")
     assert body["findings"][0]["severity"] == "HIGH"
     assert body["runKey"].startswith("secman-web-check-v1:")
+
+
+def test_build_run_body_includes_sanitized_inventory_snapshot() -> None:
+    subject = IntegrationSubject(2, 1, 3, "example.com", "https://example.com/")
+    component = DetectedComponent.create(
+        ComponentCategory.JAVASCRIPT_LIBRARY,
+        "jQuery",
+        version="3.7.1",
+        confidence=0.95,
+        evidence_type="RESOURCE_URL",
+        evidence="Matched jQuery resource URL",
+        source_url="https://cdn.example/jquery-3.7.1.min.js",
+    )
+    result = replace(
+        _result(),
+        components=(component,),
+        exposure=ExposureObservation(
+            "https://example.com/",
+            "https://example.com/login",
+            Reachability.REACHABLE,
+            200,
+            1,
+            body_length=2048,
+        ),
+        inventory_complete=True,
+    )
+
+    inventory = build_run_body(1, subject, result)["inventory"]
+
+    assert inventory["completeCoverage"] is True
+    assert inventory["exposure"]["reachability"] == "REACHABLE"
+    assert "bodyLength" not in inventory["exposure"]
+    assert inventory["components"][0]["name"] == "jQuery"
+
+
+def test_secman_subjects_are_directly_bound_to_loaded_targets() -> None:
+    subjects = [
+        IntegrationSubject(4, 1, 9, "example.com", "https://example.com/app"),
+        IntegrationSubject(5, 1, 10, "missing-uri", None),
+    ]
+
+    targets = targets_from_subjects(subjects)
+
+    assert len(targets) == 1
+    assert targets[0].secman_subject_id == 4
+    assert targets[0].secman_asset_id == 9
+
+
+def test_run_key_is_deterministic_and_complete_coverage_tracks_the_result() -> None:
+    subject = IntegrationSubject(2, 1, 3, "example.com", "https://example.com/")
+    result = replace(_result(), complete=False)
+
+    first = build_run_body(1, subject, result, metadata={"targetCount": 1, "active": False})
+    reordered = build_run_body(
+        1,
+        subject,
+        result,
+        metadata={"active": False, "targetCount": 1},
+    )
+
+    assert first["completeCoverage"] is False
+    assert first["runKey"] == reordered["runKey"]
 
 
 def test_match_subject_accepts_canonical_uri_or_host() -> None:
@@ -128,6 +201,34 @@ def test_client_uses_bearer_auth_without_following_redirects() -> None:
     assert subjects[0].cloud_account_id == "111122223333"
     assert response["id"] == 7
     assert all(request.headers["Authorization"] == "Bearer secret-token" for request in requests)
+    assert [(request.method, request.url.path) for request in requests] == [
+        ("GET", "/api/integrations/v1/scanners/1/subjects"),
+        ("POST", "/api/integrations/v1/runs"),
+    ]
+
+
+def test_client_errors_do_not_include_response_bodies_or_credentials() -> None:
+    sensitive = "internal-error-detail"
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(500, text=sensitive)
+
+    client = IntegrationClient("https://secman.example", "secret-token")
+    client._client = httpx.Client(  # type: ignore[reportPrivateUsage]
+        base_url="https://secman.example",
+        headers={"Authorization": "Bearer secret-token"},
+        transport=httpx.MockTransport(handler),
+        follow_redirects=False,
+    )
+    with client:
+        with pytest.raises(SecmanIntegrationError) as discovery:
+            client.list_subjects(1)
+        with pytest.raises(SecmanIntegrationError) as submission:
+            client.submit_run({"scannerId": 1})
+
+    for error in (discovery.value, submission.value):
+        assert sensitive not in str(error)
+        assert "secret-token" not in str(error)
 
 
 def test_base_url_rejects_non_https_and_credentials() -> None:

@@ -77,6 +77,24 @@ class NormalizedTarget:
     host: str
     port: int | None
     aws_account_number: str | None = None
+    secman_subject_id: int | None = None
+    secman_asset_id: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class SkippedTarget:
+    """An input line rejected while loading targets in non-strict mode."""
+
+    value: str
+    reason: str
+
+
+@dataclass(frozen=True, slots=True)
+class LoadedTargets:
+    """Normalized targets plus any input lines skipped in non-strict mode."""
+
+    targets: tuple[NormalizedTarget, ...]
+    skipped: tuple[SkippedTarget, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -149,8 +167,15 @@ def load_targets(
     single: str | None,
     file: Path | None,
     csv_file: Path | None = None,
-) -> tuple[NormalizedTarget, ...]:
-    """Load unique normalized targets from one supported input source."""
+    *,
+    strict: bool = False,
+) -> LoadedTargets:
+    """Load unique normalized targets from one supported input source.
+
+    Strict mode raises on the first invalid input line. Otherwise invalid
+    lines are skipped and recorded in ``LoadedTargets.skipped``.
+    """
+    skipped: list[SkippedTarget] = []
     values: list[tuple[str, str | None]] = []
     if single is not None:
         values.append((single, None))
@@ -160,22 +185,37 @@ def load_targets(
             if stripped and not stripped.startswith("#"):
                 values.append((stripped, None))
     if csv_file is not None:
-        values.extend(_load_csv_values(csv_file))
+        values.extend(_load_csv_values(csv_file, strict=strict, skipped=skipped))
 
     targets: list[NormalizedTarget] = []
     seen: dict[str, str | None] = {}
     for value, aws_account_number in values:
-        target = replace(normalize_target(value), aws_account_number=aws_account_number)
+        try:
+            target = replace(normalize_target(value), aws_account_number=aws_account_number)
+        except TargetError as error:
+            if strict:
+                raise
+            skipped.append(SkippedTarget(value=value, reason=str(error)))
+            continue
         previous_account = seen.get(target.url)
         if target.url in seen and previous_account != aws_account_number:
-            raise TargetError(f"target {target.url} is assigned to more than one AWS account")
+            reason = f"target {target.url} is assigned to more than one AWS account"
+            if strict:
+                raise TargetError(reason)
+            skipped.append(SkippedTarget(value=value, reason=reason))
+            continue
         if target.url not in seen:
             seen[target.url] = aws_account_number
             targets.append(target)
-    return tuple(targets)
+    return LoadedTargets(targets=tuple(targets), skipped=tuple(skipped))
 
 
-def _load_csv_values(path: Path) -> list[tuple[str, str]]:
+def _load_csv_values(
+    path: Path,
+    *,
+    strict: bool,
+    skipped: list[SkippedTarget],
+) -> list[tuple[str, str]]:
     """Read AWS account and target pairs from a header-based CSV file."""
     with path.open(encoding="utf-8-sig", newline="") as source:
         reader = csv.DictReader(source)
@@ -184,15 +224,21 @@ def _load_csv_values(path: Path) -> list[tuple[str, str]]:
 
         values: list[tuple[str, str]] = []
         for line_number, row in enumerate(reader, start=2):
-            if None in row:
-                raise TargetError(f"target CSV row {line_number} has too many columns")
             account = (row.get("awsAccountNumber") or "").strip()
             target = (row.get("target") or "").strip()
-            if not re.fullmatch(r"[0-9]{12}", account):
-                raise TargetError(f"target CSV row {line_number} has an invalid AWS account number")
-            if not target:
-                raise TargetError(f"target CSV row {line_number} has an empty target")
-            values.append((target, account))
+            reason: str | None = None
+            if None in row:
+                reason = f"target CSV row {line_number} has too many columns"
+            elif not re.fullmatch(r"[0-9]{9,12}", account):
+                reason = f"target CSV row {line_number} has an invalid AWS account number"
+            elif not target:
+                reason = f"target CSV row {line_number} has an empty target"
+            if reason is not None:
+                if strict:
+                    raise TargetError(reason)
+                skipped.append(SkippedTarget(value=target, reason=reason))
+                continue
+            values.extend((candidate, account) for candidate in target.split())
     return values
 
 

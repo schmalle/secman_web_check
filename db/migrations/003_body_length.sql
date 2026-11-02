@@ -1,0 +1,2 @@
+ALTER TABLE scan_target
+  ADD COLUMN IF NOT EXISTS body_length INT UNSIGNED NULL;

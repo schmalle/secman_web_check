@@ -1,0 +1,373 @@
+{
+  "cases": [
+    {
+      "actual": [
+        "WEB-HEADER-HSTS-MISSING"
+      ],
+      "class": "hsts",
+      "expected": [
+        "WEB-HEADER-HSTS-MISSING"
+      ],
+      "fn": 0,
+      "fp": 0,
+      "id": "hsts-vulnerable",
+      "label": "vulnerable",
+      "tn": 0,
+      "tp": 1,
+      "url": "https://fixture.example/"
+    },
+    {
+      "actual": [],
+      "class": "hsts",
+      "expected": [],
+      "fn": 0,
+      "fp": 0,
+      "id": "hsts-safe",
+      "label": "safe",
+      "tn": 1,
+      "tp": 0,
+      "url": "https://fixture.example/"
+    },
+    {
+      "actual": [
+        "WEB-HEADER-CSP-UNSAFE"
+      ],
+      "class": "csp",
+      "expected": [
+        "WEB-HEADER-CSP-UNSAFE"
+      ],
+      "fn": 0,
+      "fp": 0,
+      "id": "csp-vulnerable",
+      "label": "vulnerable",
+      "tn": 0,
+      "tp": 1,
+      "url": "https://fixture.example/"
+    },
+    {
+      "actual": [],
+      "class": "csp",
+      "expected": [],
+      "fn": 0,
+      "fp": 0,
+      "id": "csp-safe",
+      "label": "safe",
+      "tn": 1,
+      "tp": 0,
+      "url": "https://fixture.example/"
+    },
+    {
+      "actual": [
+        "WEB-COOKIE-SECURE-MISSING"
+      ],
+      "class": "cookies",
+      "expected": [
+        "WEB-COOKIE-SECURE-MISSING"
+      ],
+      "fn": 0,
+      "fp": 0,
+      "id": "cookie-vulnerable",
+      "label": "vulnerable",
+      "tn": 0,
+      "tp": 1,
+      "url": "https://fixture.example/"
+    },
+    {
+      "actual": [],
+      "class": "cookies",
+      "expected": [],
+      "fn": 0,
+      "fp": 0,
+      "id": "cookie-safe",
+      "label": "safe",
+      "tn": 1,
+      "tp": 0,
+      "url": "https://fixture.example/"
+    },
+    {
+      "actual": [
+        "WEB-CORS-WILDCARD-CREDENTIALS"
+      ],
+      "class": "cors",
+      "expected": [
+        "WEB-CORS-WILDCARD-CREDENTIALS"
+      ],
+      "fn": 0,
+      "fp": 0,
+      "id": "cors-vulnerable",
+      "label": "vulnerable",
+      "tn": 0,
+      "tp": 1,
+      "url": "https://fixture.example/"
+    },
+    {
+      "actual": [],
+      "class": "cors",
+      "expected": [],
+      "fn": 0,
+      "fp": 0,
+      "id": "cors-safe",
+      "label": "safe",
+      "tn": 1,
+      "tp": 0,
+      "url": "https://fixture.example/"
+    },
+    {
+      "actual": [
+        "WEB-CONTENT-MIXED-ACTIVE"
+      ],
+      "class": "mixed-content",
+      "expected": [
+        "WEB-CONTENT-MIXED-ACTIVE"
+      ],
+      "fn": 0,
+      "fp": 0,
+      "id": "mixed-vulnerable",
+      "label": "vulnerable",
+      "tn": 0,
+      "tp": 1,
+      "url": "https://fixture.example/"
+    },
+    {
+      "actual": [],
+      "class": "mixed-content",
+      "expected": [],
+      "fn": 0,
+      "fp": 0,
+      "id": "mixed-safe",
+      "label": "safe",
+      "tn": 1,
+      "tp": 0,
+      "url": "https://fixture.example/"
+    },
+    {
+      "actual": [
+        "WEB-COMPONENT-CVE-2020-11022",
+        "WEB-COMPONENT-CVE-2020-11023"
+      ],
+      "class": "components",
+      "expected": [
+        "WEB-COMPONENT-CVE-2020-11022",
+        "WEB-COMPONENT-CVE-2020-11023"
+      ],
+      "fn": 0,
+      "fp": 0,
+      "id": "component-vulnerable",
+      "label": "vulnerable",
+      "tn": 0,
+      "tp": 2,
+      "url": "https://fixture.example/"
+    },
+    {
+      "actual": [],
+      "class": "components",
+      "expected": [],
+      "fn": 0,
+      "fp": 0,
+      "id": "component-safe",
+      "label": "safe",
+      "tn": 2,
+      "tp": 0,
+      "url": "https://fixture.example/"
+    },
+    {
+      "actual": [
+        "WEB-CONTENT-DIRECTORY-LISTING"
+      ],
+      "class": "directory-listing",
+      "expected": [
+        "WEB-CONTENT-DIRECTORY-LISTING"
+      ],
+      "fn": 0,
+      "fp": 0,
+      "id": "directory-listing-vulnerable",
+      "label": "vulnerable",
+      "tn": 0,
+      "tp": 1,
+      "url": "https://fixture.example/"
+    },
+    {
+      "actual": [],
+      "class": "directory-listing",
+      "expected": [],
+      "fn": 0,
+      "fp": 0,
+      "id": "directory-listing-safe",
+      "label": "safe",
+      "tn": 1,
+      "tp": 0,
+      "url": "https://fixture.example/"
+    },
+    {
+      "actual": [
+        "WEB-CONTENT-DEBUG-ERROR"
+      ],
+      "class": "debug-disclosure",
+      "expected": [
+        "WEB-CONTENT-DEBUG-ERROR"
+      ],
+      "fn": 0,
+      "fp": 0,
+      "id": "debug-disclosure-vulnerable",
+      "label": "vulnerable",
+      "tn": 0,
+      "tp": 1,
+      "url": "https://fixture.example/"
+    },
+    {
+      "actual": [],
+      "class": "debug-disclosure",
+      "expected": [],
+      "fn": 0,
+      "fp": 0,
+      "id": "debug-disclosure-safe",
+      "label": "safe",
+      "tn": 1,
+      "tp": 0,
+      "url": "https://fixture.example/"
+    },
+    {
+      "actual": [
+        "WEB-CONTENT-INSECURE-FORM"
+      ],
+      "class": "insecure-forms",
+      "expected": [
+        "WEB-CONTENT-INSECURE-FORM"
+      ],
+      "fn": 0,
+      "fp": 0,
+      "id": "insecure-forms-vulnerable",
+      "label": "vulnerable",
+      "tn": 0,
+      "tp": 1,
+      "url": "https://fixture.example/"
+    },
+    {
+      "actual": [],
+      "class": "insecure-forms",
+      "expected": [],
+      "fn": 0,
+      "fp": 0,
+      "id": "insecure-forms-safe",
+      "label": "safe",
+      "tn": 1,
+      "tp": 0,
+      "url": "https://fixture.example/"
+    },
+    {
+      "actual": [
+        "WEB-CONTENT-SECRET"
+      ],
+      "class": "secret-signatures",
+      "expected": [
+        "WEB-CONTENT-SECRET"
+      ],
+      "fn": 0,
+      "fp": 0,
+      "id": "secret-signatures-vulnerable",
+      "label": "vulnerable",
+      "tn": 0,
+      "tp": 1,
+      "url": "https://fixture.example/"
+    },
+    {
+      "actual": [],
+      "class": "secret-signatures",
+      "expected": [],
+      "fn": 0,
+      "fp": 0,
+      "id": "secret-signatures-safe",
+      "label": "safe",
+      "tn": 1,
+      "tp": 0,
+      "url": "https://fixture.example/"
+    }
+  ],
+  "corpusSha256": "24954dfe431e1a6eaf875e4671e95682b9efff4bc27e1017cdf993edd1d00fbe",
+  "evaluatorRevision": "8b9a4c33cbea9b20f2f9960a0e60f213a1e92b9de30d65efbcbcbd686d74f36e",
+  "passed": true,
+  "perClass": {
+    "components": {
+      "fn": 0,
+      "fp": 0,
+      "precision": 1.0,
+      "recall": 1.0,
+      "tn": 2,
+      "tp": 2
+    },
+    "cookies": {
+      "fn": 0,
+      "fp": 0,
+      "precision": 1.0,
+      "recall": 1.0,
+      "tn": 1,
+      "tp": 1
+    },
+    "cors": {
+      "fn": 0,
+      "fp": 0,
+      "precision": 1.0,
+      "recall": 1.0,
+      "tn": 1,
+      "tp": 1
+    },
+    "csp": {
+      "fn": 0,
+      "fp": 0,
+      "precision": 1.0,
+      "recall": 1.0,
+      "tn": 1,
+      "tp": 1
+    },
+    "debug-disclosure": {
+      "fn": 0,
+      "fp": 0,
+      "precision": 1.0,
+      "recall": 1.0,
+      "tn": 1,
+      "tp": 1
+    },
+    "directory-listing": {
+      "fn": 0,
+      "fp": 0,
+      "precision": 1.0,
+      "recall": 1.0,
+      "tn": 1,
+      "tp": 1
+    },
+    "hsts": {
+      "fn": 0,
+      "fp": 0,
+      "precision": 1.0,
+      "recall": 1.0,
+      "tn": 1,
+      "tp": 1
+    },
+    "insecure-forms": {
+      "fn": 0,
+      "fp": 0,
+      "precision": 1.0,
+      "recall": 1.0,
+      "tn": 1,
+      "tp": 1
+    },
+    "mixed-content": {
+      "fn": 0,
+      "fp": 0,
+      "precision": 1.0,
+      "recall": 1.0,
+      "tn": 1,
+      "tp": 1
+    },
+    "secret-signatures": {
+      "fn": 0,
+      "fp": 0,
+      "precision": 1.0,
+      "recall": 1.0,
+      "tn": 1,
+      "tp": 1
+    }
+  },
+  "scope": "Synthetic response fixtures; not real-world detection assurance",
+  "version": 1
+}

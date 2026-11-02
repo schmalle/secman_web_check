@@ -37,4 +37,5 @@ def test_active_checks_use_only_fixed_catalogue_requests():
         ("GET", "https://example.com/.git/HEAD"),
         ("GET", "https://example.com/server-status"),
         ("GET", "https://example.com/wp-config.php.bak"),
+        ("GET", "https://example.com/?next=https%3A%2F%2Fscanner.invalid%2F"),
     }

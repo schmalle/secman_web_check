@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import ssl
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import datetime
@@ -11,13 +12,21 @@ from typing import Any, Self
 from urllib.parse import urlsplit, urlunsplit
 
 import httpx
+import truststore
 
-from .models import Finding, TargetResult
+from .integration_outbox import DeliveryError
+from .models import DetectedComponent, ExposureObservation, Finding, TargetResult
+from .targets import NormalizedTarget, TargetError, normalize_target
 
 _TIMEOUT_SECONDS = 30.0
 
 
-class SecmanIntegrationError(RuntimeError):
+def _system_ca_context() -> ssl.SSLContext:
+    """Use the native OS trust store while retaining TLS and hostname verification."""
+    return truststore.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+
+
+class SecmanIntegrationError(DeliveryError):
     """Raised when the SecMan integration contract cannot be satisfied."""
 
 
@@ -112,13 +121,62 @@ def _finding_body(finding: Finding) -> dict[str, Any]:
         "lineRange": None,
         "url": finding.url,
         "confidence": finding.confidence,
-        "engine": "secman-web-check",
-        "model": None,
+        "engine": finding.engine,
+        "model": finding.model,
         "commitSha": None,
         "issueUrl": None,
         "fixPrUrl": None,
         "attachments": [],
     }
+
+
+def _component_body(component: DetectedComponent) -> dict[str, Any]:
+    return {
+        "componentKey": component.component_key,
+        "category": component.category.value,
+        "name": component.name,
+        "version": component.version,
+        "confidence": component.confidence,
+        "evidenceType": component.evidence_type,
+        "evidence": component.evidence,
+        "sourceUrl": component.source_url,
+    }
+
+
+def _exposure_body(exposure: ExposureObservation) -> dict[str, Any]:
+    return {
+        "configuredUrl": exposure.configured_url,
+        "effectiveUrl": exposure.effective_url,
+        "reachability": "REACHABLE" if exposure.reachability.value == "AUTHENTICATED" else exposure.reachability.value,
+        "httpStatus": exposure.http_status,
+        "redirectCount": exposure.redirect_count,
+        "vantagePoint": exposure.vantage_point,
+    }
+
+
+def targets_from_subjects(subjects: Iterable[IntegrationSubject]) -> tuple[NormalizedTarget, ...]:
+    """Convert explicitly bound SecMan subjects into scan targets without guessing URLs."""
+    targets: list[NormalizedTarget] = []
+    for subject in subjects:
+        if subject.uri is None:
+            continue
+        try:
+            target = normalize_target(subject.uri)
+        except TargetError as error:
+            raise SecmanIntegrationError(
+                f"SecMan subject {subject.id} has an invalid HTTP(S) URI"
+            ) from error
+        targets.append(
+            NormalizedTarget(
+                url=target.url,
+                scheme=target.scheme,
+                host=target.host,
+                port=target.port,
+                secman_subject_id=subject.id,
+                secman_asset_id=subject.asset_id,
+            )
+        )
+    return tuple(targets)
 
 
 def build_run_body(
@@ -152,6 +210,17 @@ def build_run_body(
         "metadataJson": json.dumps(metadata or {}, sort_keys=True, separators=(",", ":")),
         "findings": findings,
     }
+    if result.exposure is not None or result.components:
+        if len(result.components) > 500:
+            raise SecmanIntegrationError("integration run exceeds the 500-component limit")
+        body["inventory"] = {
+            "completeCoverage": result.inventory_complete,
+            "exposure": None if result.exposure is None else _exposure_body(result.exposure),
+            "components": [
+                _component_body(component)
+                for component in sorted(result.components, key=lambda item: item.component_key)
+            ],
+        }
     canonical = json.dumps(body, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     body["runKey"] = "secman-web-check-v1:" + hashlib.sha256(canonical.encode()).hexdigest()
     return body
@@ -166,6 +235,7 @@ class IntegrationClient:
         self._client = httpx.Client(
             base_url=validate_base_url(base_url),
             headers={"Authorization": f"Bearer {token}"},
+            verify=_system_ca_context(),
             timeout=_TIMEOUT_SECONDS,
             follow_redirects=False,
             trust_env=False,
@@ -178,6 +248,7 @@ class IntegrationClient:
         instance = cls.__new__(cls)
         instance._client = httpx.Client(
             base_url=validate_base_url(base_url),
+            verify=_system_ca_context(),
             timeout=_TIMEOUT_SECONDS,
             follow_redirects=False,
             trust_env=False,
@@ -189,7 +260,7 @@ class IntegrationClient:
             )
         except httpx.HTTPError as error:
             instance.close()
-            raise SecmanIntegrationError("SecMan login request failed") from error
+            raise SecmanIntegrationError("SecMan login request failed", True) from error
         if response.status_code not in {200, 204}:
             instance.close()
             raise SecmanIntegrationError(f"SecMan login failed with HTTP {response.status_code}")
@@ -216,7 +287,7 @@ class IntegrationClient:
                     params={"page": page, "size": size},
                 )
             except httpx.HTTPError as error:
-                raise SecmanIntegrationError("SecMan subject discovery request failed") from error
+                raise SecmanIntegrationError("SecMan subject discovery request failed", True) from error
             if response.status_code != 200:
                 raise SecmanIntegrationError(
                     f"SecMan subject discovery failed with HTTP {response.status_code}"
@@ -237,15 +308,16 @@ class IntegrationClient:
         try:
             response = self._client.post("/api/integrations/v1/runs", json=dict(body))
         except httpx.HTTPError as error:
-            raise SecmanIntegrationError("SecMan run submission request failed") from error
+            raise SecmanIntegrationError("SecMan run submission request failed", True) from error
         if response.status_code not in {200, 201}:
             raise SecmanIntegrationError(
-                f"SecMan run submission failed with HTTP {response.status_code}"
+                f"http_{response.status_code}", response.status_code in {408, 429} or response.status_code >= 500,
+                float(response.headers.get("Retry-After", "0")) if response.headers.get("Retry-After", "0").isdigit() else 0
             )
         try:
             payload = response.json()
         except ValueError as error:
-            raise SecmanIntegrationError("SecMan run submission returned invalid JSON") from error
+            raise SecmanIntegrationError("SecMan run submission returned invalid JSON", True) from error
         if not isinstance(payload, dict):
             raise SecmanIntegrationError("SecMan run submission returned an invalid response")
         return payload

@@ -51,27 +51,92 @@ def test_load_targets_skips_comments_and_preserves_first_normalized_url(tmp_path
     path = tmp_path / "targets.txt"
     path.write_text("\n# approved targets\nHTTP://EXAMPLE.COM:80/\nexample.com\n", encoding="utf-8")
 
-    targets = load_targets("https://example.com/", path)
+    loaded = load_targets("https://example.com/", path)
 
-    assert tuple(target.url for target in targets) == (
+    assert tuple(target.url for target in loaded.targets) == (
         "https://example.com/",
         "http://example.com/",
     )
+    assert loaded.skipped == ()
+
+
+def test_load_targets_skips_invalid_lines_without_strict(tmp_path: Path) -> None:
+    path = tmp_path / "targets.txt"
+    path.write_text(
+        "example.com\nftp://unsupported.example\nother.example:8080/status\n",
+        encoding="utf-8",
+    )
+
+    loaded = load_targets(None, path)
+
+    assert tuple(target.url for target in loaded.targets) == (
+        "https://example.com/",
+        "https://other.example:8080/status",
+    )
+    assert [skipped.value for skipped in loaded.skipped] == ["ftp://unsupported.example"]
+    assert "scheme" in loaded.skipped[0].reason
+
+
+def test_load_targets_strict_raises_on_the_first_invalid_line(tmp_path: Path) -> None:
+    path = tmp_path / "targets.txt"
+    path.write_text("example.com\nftp://unsupported.example\n", encoding="utf-8")
+
+    with pytest.raises(TargetError, match="scheme"):
+        load_targets(None, path, strict=True)
 
 
 def test_load_targets_csv_retains_validated_aws_account_numbers(tmp_path: Path) -> None:
     path = tmp_path / "targets.csv"
     path.write_text(
-        "awsAccountNumber,target\n111122223333,example.com\n444455556666,https://other.example/path\n",
+        "awsAccountNumber,target\n"
+        "111122223333,example.com\n"
+        "444455556666,https://other.example/path\n"
+        "123456789,short-account.example\n",
         encoding="utf-8",
     )
 
-    targets = load_targets(None, None, path)
+    loaded = load_targets(None, None, path)
 
-    assert [(target.aws_account_number, target.url) for target in targets] == [
+    assert [(target.aws_account_number, target.url) for target in loaded.targets] == [
         ("111122223333", "https://example.com/"),
         ("444455556666", "https://other.example/path"),
+        ("123456789", "https://short-account.example/"),
     ]
+    assert loaded.skipped == ()
+
+
+def test_load_targets_csv_splits_whitespace_separated_targets(tmp_path: Path) -> None:
+    path = tmp_path / "targets.csv"
+    path.write_text(
+        "awsAccountNumber,target\n111122223333,example.com  other.example\n",
+        encoding="utf-8",
+    )
+
+    loaded = load_targets(None, None, path)
+
+    assert [(target.aws_account_number, target.url) for target in loaded.targets] == [
+        ("111122223333", "https://example.com/"),
+        ("111122223333", "https://other.example/"),
+    ]
+    assert loaded.skipped == ()
+
+
+def test_load_targets_csv_skips_only_an_invalid_split_target_without_strict(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "targets.csv"
+    path.write_text(
+        "awsAccountNumber,target\n111122223333,example.com ftp://unsupported.example\n",
+        encoding="utf-8",
+    )
+
+    loaded = load_targets(None, None, path)
+
+    assert [(target.aws_account_number, target.url) for target in loaded.targets] == [
+        ("111122223333", "https://example.com/"),
+    ]
+    assert len(loaded.skipped) == 1
+    assert loaded.skipped[0].value == "ftp://unsupported.example"
 
 
 @pytest.mark.parametrize(
@@ -80,6 +145,8 @@ def test_load_targets_csv_retains_validated_aws_account_numbers(tmp_path: Path) 
         "account,target\n111122223333,example.com\n",
         "AWS Account Number,TARGET\n111122223333,example.com\n",
         "awsAccountNumber,target\n123,example.com\n",
+        "awsAccountNumber,target\n12345678,example.com\n",
+        "awsAccountNumber,target\n1234567890123,example.com\n",
         "awsAccountNumber,target\n111122223333,\n",
         "awsAccountNumber,target\n111122223333,example.com,extra\n",
     ],
@@ -89,6 +156,35 @@ def test_load_targets_csv_rejects_malformed_rows(tmp_path: Path, content: str) -
     path.write_text(content, encoding="utf-8")
 
     with pytest.raises(TargetError):
+        load_targets(None, None, path, strict=True)
+
+
+def test_load_targets_csv_skips_malformed_rows_without_strict(tmp_path: Path) -> None:
+    path = tmp_path / "targets.csv"
+    path.write_text(
+        "awsAccountNumber,target\n"
+        "123,bad-account.example\n"
+        "111122223333,example.com\n"
+        "222233334444,\n"
+        "555566667777,other.example,extra\n",
+        encoding="utf-8",
+    )
+
+    loaded = load_targets(None, None, path)
+
+    assert tuple(target.url for target in loaded.targets) == ("https://example.com/",)
+    assert [skipped.reason for skipped in loaded.skipped] == [
+        "target CSV row 2 has an invalid AWS account number",
+        "target CSV row 4 has an empty target",
+        "target CSV row 5 has too many columns",
+    ]
+
+
+def test_load_targets_csv_rejects_a_bad_header_even_without_strict(tmp_path: Path) -> None:
+    path = tmp_path / "targets.csv"
+    path.write_text("account,target\n111122223333,example.com\n", encoding="utf-8")
+
+    with pytest.raises(TargetError, match="header"):
         load_targets(None, None, path)
 
 
@@ -100,7 +196,24 @@ def test_load_targets_csv_rejects_one_target_assigned_to_two_accounts(tmp_path: 
     )
 
     with pytest.raises(TargetError, match="more than one AWS account"):
-        load_targets(None, None, path)
+        load_targets(None, None, path, strict=True)
+
+
+def test_load_targets_csv_skips_a_conflicting_second_account_without_strict(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "targets.csv"
+    path.write_text(
+        "awsAccountNumber,target\n111122223333,example.com\n444455556666,EXAMPLE.COM\n",
+        encoding="utf-8",
+    )
+
+    loaded = load_targets(None, None, path)
+
+    assert [(target.aws_account_number, target.url) for target in loaded.targets] == [
+        ("111122223333", "https://example.com/"),
+    ]
+    assert "more than one AWS account" in loaded.skipped[0].reason
 
 
 def test_private_addresses_require_opt_in() -> None:

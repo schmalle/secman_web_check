@@ -1,8 +1,8 @@
 # SecMan web-security check
 
-`secman-web-check` is an authorized, bounded scanner for HTTP response policy, TLS
-configuration, cookies, CORS, content exposure, and a small opt-in set of active
-misconfiguration probes. It scans only targets you explicitly supply.
+`secman-web-check` is the merged command-line scanner for two selectable approaches:
+bounded HTTP/TLS security checks and headless-browser visual exposure checks. Run
+either approach independently or run both against the same explicit target set.
 
 Redirect chains are reported hop by hop. Cross-host transitions and blocked downgrade,
 invalid, or over-limit redirects receive distinct findings.
@@ -29,8 +29,45 @@ uv run --locked secman-web-check scan https://example.com \
 
 Replace `https://example.com` with an authorized target. The final command performs a
 passive HTTP/TLS scan and writes terminal, JSON, SARIF, and self-contained HTML output.
-Machine reports are placed below `scan-output/` and contain findings only—never raw
-response bodies.
+The terminal, JSON, and HTML views include best-effort JavaScript/CSS library and web
+server fingerprints, locally matched vulnerable-version advisories, and external
+reachability from the scanner's vantage point. These records can be printed, stored in
+the optional local MariaDB, or sent through the optional SecMan integration. Machine
+reports never contain raw response bodies.
+
+Referenced JavaScript collection is an explicit opt-in. Each external `src` is fetched
+through the same per-request DNS validation and pinned connection path as the main scan;
+only its URL, HTTP status, byte count, truncation state, and SHA-256 checksum
+are retained. Script response bytes are discarded. Additional script origins require
+`--allowed-origin`; unapproved origins leave inventory incomplete:
+
+```bash
+uv run --locked secman-web-check scan https://example.com \
+  --javascript-inventory --format all --fail-on none
+```
+
+Inventory URLs are query-redacted, and combined mode preserves script metadata.
+Reports include a versioned coverage manifest/hash, per-check execution states, evidence
+references, and analysis attribution. Review failures preserve completed scan evidence.
+
+An optional OpenRouter system review can select supported evidence references for human review. It is
+never enabled by default and does not send raw HTTP response bodies. The system prompt
+is always read from a file: the packaged `src/prompts/system-review.txt` by default, or
+a user-maintained file selected with `--llm-prompt`. Focused templates are also packaged
+as `src/prompts/aws-security-review.txt` and
+`src/prompts/secrets-security-review.txt`.
+
+```bash
+export OPENROUTER_API_KEY='load-from-your-secret-manager'
+uv run --locked secman-web-check scan https://example.com \
+  --javascript-inventory --llm-review \
+  --llm-prompt ./my-system-review-prompt.txt --fail-on none
+```
+
+For example, select the AWS-focused template with
+`--llm-prompt src/prompts/aws-security-review.txt`. The AWS and secrets templates require
+evidence-backed conclusions, prohibit guessing unobserved cloud configuration or secret
+values, and preserve the scanner's passive boundary.
 
 You can also activate the virtual environment and use the installed command directly:
 
@@ -40,6 +77,59 @@ secman-web-check scan https://example.com
 ```
 
 ## Common examples
+
+Select the scan approach explicitly:
+
+```bash
+# HTTP/TLS checks only (the backward-compatible default)
+uv run --locked secman-web-check scan https://example.com --scan-mode security
+
+# Browser screenshot without external image transfer
+uv run --locked secman-web-check scan https://example.com \
+  --scan-mode visual --visual-no-ai
+
+# Security and visual scans in one local report
+uv run --locked secman-web-check scan https://example.com \
+  --scan-mode both --visual-no-ai --format all --fail-on none
+```
+
+`--visual-no-ai` performs deterministic screenshot capture without a model call, so it
+cannot report visual-content findings. Screenshots are written below
+`OUTPUT_DIR/screenshots` unless `--visual-output-dir` is supplied. Full-page captures
+are capped at 4000 pixels. Only final HTTP 200 responses are captured. To use OpenRouter,
+review and redact a local PNG, place a crop with the same filename in a separate
+directory, and rerun with `--visual-redacted-crops DIR` and `SECMAN_VISION_API_KEY`.
+The raw screenshot and page text are never sent to the provider.
+
+Discover linked public pages and literal GET paths from a local OpenAPI JSON file:
+
+```bash
+uv run --locked secman-web-check scan https://example.com \
+  --crawl --api-spec openapi.json --max-pages 50 --max-depth 2 \
+  --format json --fail-on none
+```
+
+`--crawl` stays on the target origin. A repeatable `--allowed-origin URL` grants additional
+origins explicitly. The default crawl ceiling is 50 pages, depth 2, and 200 requests per
+target. Incomplete coverage marks the target partial.
+
+Let OpenRouter sequence only reviewed active probes:
+
+```bash
+SECMAN_AI_API_KEY='load-from-your-secret-manager' \
+  uv run --locked secman-web-check scan https://example.com \
+  --active --ai-agent --format json --fail-on none
+```
+
+The model sees rule IDs, severities, and an origin. It cannot supply request URLs,
+methods, headers, or payloads. See [AI agent and image privacy](docs/AI_AGENT.md).
+
+Compare two local JSON reports without treating a partial or different-profile scan as
+proof that an old finding was fixed:
+
+```bash
+uv run --locked secman-web-check compare old.json new.json --json
+```
 
 Scan one public target using safe defaults:
 
@@ -78,6 +168,25 @@ The `--active` flag enables fixed `TRACE`, `OPTIONS`, `.env`, `.git/HEAD`,
 `server-status`, and configuration-backup requests. It does not enable crawling,
 arbitrary paths, authentication, exploitation, brute force, or fuzzing.
 
+Additional bounded directory discovery is a separate explicit opt-in. It requests a
+small built-in list only when the main response is HTTP 200; it is non-recursive and
+does not mutate the target:
+
+```bash
+uv run --locked secman-web-check scan https://example.com --dirbuster
+```
+
+Two external scanners can be selected with an exact checksum-pinned reviewed profile.
+Native macOS containment restricts child egress to the scope proxy; unsupported
+containment fails closed. Tools are optional, require reviewed read-only assets, and
+are never implied by `--active`. See [CLI.md](docs/CLI.md) for profile format and limits.
+
+```bash
+uv run --locked secman-web-check scan https://example.com/ \
+  --external-scanner nuclei --external-profile reviewed-profile.json \
+  --external-profile-sha256 "$PROFILE_SHA256" --fail-on none
+```
+
 Scan an authorized private target:
 
 ```bash
@@ -89,9 +198,44 @@ This flag permits only RFC1918 IPv4 and IPv6 ULA addresses. Loopback, link-local
 multicast, unspecified, documentation, and other special-purpose ranges remain denied.
 It does not imply `--active`.
 
+## Evidence, discovery and maintained advisories
+
+All engines share run/origin admission limits, with hard target-worker deadlines. TLS
+vulnerability probes require `--tls-vulnerabilities`; the default TLS profile inventories
+certificates/protocols. `--active` remains a separate HTTP-probe opt-in. External scanners
+now require a checksum-pinned reviewed profile and enforced native macOS containment;
+unsupported containment fails closed. See the [CLI reference](docs/CLI.md).
+
+```bash
+# Explicit read-only rendered discovery and declared API inventory
+secman-web-check scan https://example.com --browser-discovery --crawl --api-spec openapi.json
+
+# Update public vulnerability metadata separately; scans remain offline for matching
+secman-web-check intel update --package jquery --package lodash --output advisories.json
+secman-web-check scan https://example.com --advisory-db advisories.json \
+  --advisory-sha256 "$ADVISORY_SHA256" --format json
+
+# Reproduce the synthetic detection measurements without target requests
+secman-web-check evaluate tests/fixtures/detection.json --output measurements.json
+```
+
+Keep the checksum printed by the update in trusted configuration. Snapshot provenance,
+freshness and unsupported ranges are recorded. Stale snapshots mark coverage incomplete.
+Without a snapshot, the small bundled legacy catalogue remains explicitly identified.
+Browser discovery follows rendered anchors and observes fetch/XHR through the pinned
+collector; writes/session replay stay blocked. OpenAPI declarations include unexecuted
+operations and parameter names/types, without example or parameter values.
+
+MariaDB schema 4 adds a full normalized JSON archive. Export it with
+`secman-web-check history export RUN_ID --output report.json`; older history remains
+summary-only. Model observations carry evidence IDs, prompt/model/policy attribution and
+human-review status. They are included in the primary mode's non-terminal SecMan snapshot
+and never establish resolution by absence.
+
 ## Targets
 
-Supply exactly one positional target, one `--targets-file`, or one `--targets-csv`.
+Supply exactly one positional target, one `--targets-file`, one `--targets-csv`, or
+`--targets-from-secman`.
 Hostnames without a scheme use HTTPS. Plain target files are UTF-8, one URL or hostname
 per line; blank lines and lines beginning with `#` are ignored, and normalized
 duplicates are removed.
@@ -101,6 +245,7 @@ secman-web-check scan example.com
 secman-web-check scan https://example.com/application/health
 secman-web-check scan --targets-file examples/targets.txt
 secman-web-check scan --targets-csv testdata/targets-aws.csv
+secman-web-check scan --targets-from-secman --push-to-secman
 ```
 
 AWS target CSV files use this exact header and one account/target pair per row:
@@ -111,9 +256,25 @@ awsAccountNumber,target
 444455556666,service.example.org
 ```
 
-Account numbers must contain exactly 12 digits. The account number is retained in JSON
+Account numbers must contain 9 to 12 digits. The account number is retained in JSON
 reports and narrows SecMan subject matching before URI or hostname matching. A normalized
-target cannot be assigned to two different accounts in the same file.
+target cannot be assigned to two different accounts in the same file. A target cell may
+list several whitespace-separated targets; each is scanned under the same account number.
+
+A line that fails validation never stops a list scan by default: the line is skipped
+with a warning on stderr, and scanning continues with the remaining targets. This
+applies to plain target files and to individual CSV rows; a malformed CSV header, an
+unreadable file, or a list in which every line is invalid still aborts the scan. Pass
+`--strict` to abort on the first invalid line instead:
+
+```bash
+secman-web-check scan --targets-file examples/targets.txt --strict
+```
+
+`--targets-from-secman` loads the authorized subjects bound to the scanner ID selected
+by the current mode. Subjects without a URI are not guessed from their name. Loaded
+targets retain the exact subject and asset IDs, so a subsequent upload cannot bind the
+observation to a same-hostname asset by mistake.
 
 User information, URL fragments, non-HTTP schemes, and denied network addresses are
 rejected. Every DNS answer and redirect is revalidated. Approved connections pin the
@@ -122,8 +283,14 @@ verification.
 
 ## Reports and exit codes
 
+While a scan runs, progress goes to stderr: one phase line per scan pass (`Security
+scan` / `Visual scan`) followed by one line per finished target with its status,
+finding and error counts, and duration. Interactive terminals additionally show a live
+progress bar. Reports stay on stdout and in the output directory, so piping stdout
+remains clean.
+
 `--format` is repeatable and accepts `terminal`, `json`, `sarif`, `html`, or `all`.
-Terminal is the default. JSON uses schema version `1.0`; SARIF uses version `2.1.0`;
+Terminal is the default. JSON uses schema version `1.3`; SARIF uses version `2.1.0`;
 HTML is self-contained, script-free, escaped, and protected by a restrictive CSP.
 
 `--fail-on` accepts `info`, `low`, `medium`, `high`, `critical`, or `none` and defaults
@@ -146,8 +313,17 @@ uv run --locked secman-web-check scan --targets-file examples/targets.txt \
   --config examples/config.toml
 ```
 
-Secrets are never accepted as CLI values or TOML settings. See
+Secrets are never accepted as CLI values or TOML settings. Vision credentials use
+`SECMAN_VISION_API_KEY`; optional `SECMAN_VISION_MODEL` and
+`SECMAN_VISION_BASE_URL` select the model/provider. See
 [Configuration reference](docs/CONFIGURATION.md).
+
+## Code-audit import (Cloudflare security-audit-skill)
+
+`secman-web-check audit import findings.json` normalizes results from
+[cloudflare/security-audit-skill](https://github.com/cloudflare/security-audit-skill) and,
+only on explicit `--push-to-github` / `--push-to-secman`, opens deduplicated GitHub issues
+and uploads non-resolving SecMan findings. See [Code-audit import](docs/CODE_AUDIT.md).
 
 ## Optional MariaDB history
 
@@ -169,22 +345,29 @@ See [MariaDB setup](docs/DATABASE.md) before applying the example grants.
 
 ## Optional SecMan upload
 
-Register the scanner in SecMan with source `WEB_SECURITY`, assign its service user and
-subjects, then set an HTTPS base URL and scanner ID. Authenticate with a bearer token or
-with username/password environment variables.
+Register separate SecMan scanners for independent lifecycle snapshots: source
+`WEB_SECURITY` for baseline security and a second `WEB_SECURITY` registration for
+extended security checks, plus source `VISUAL` for visual results. Assign the same
+authorized subjects where appropriate. Extended runs require
+`SECMAN_EXTENDED_SCANNER_ID`; their snapshots do not auto-resolve absent findings.
+A combined run requires the IDs for both selected modes.
 
 ```bash
 export SECMAN_URL=https://secman.example.invalid
-export SECMAN_SCANNER_ID=42
+export SECMAN_SECURITY_SCANNER_ID=41
+export SECMAN_VISUAL_SCANNER_ID=42
 export SECMAN_TOKEN='load-from-your-secret-manager'
 
-uv run --locked secman-web-check scan https://example.com \
+uv run --locked secman-web-check scan https://example.com --scan-mode both \
   --format json \
   --push-to-secman
 ```
 
 Uploads use `/api/integrations/v1`, never fall back to legacy ingestion, and submit each
-target as an atomic snapshot. Partial or failed coverage never resolves older findings.
+target as an atomic snapshot. Security snapshots may include exposure and component
+inventory; visual snapshots remain finding-only. Partial or failed coverage never
+resolves older findings or components. Baseline resolution additionally requires an exact
+operator-approved `SECMAN_BASELINE_PROFILE_SHA256`; other uploads remain non-terminal.
 See [SecMan integration](docs/SECMAN.md).
 
 To resolve the SecMan credentials with Proton Pass, copy the reference-only example,
@@ -207,6 +390,17 @@ Use `--env-file FILE` (or `SECMAN_WEB_CHECK_PASS_ENV_FILE`) for another referenc
 in the child process environment and are never added to the scanner command line.
 The ready-to-edit CSV used above is stored at `testdata/targets-aws.csv`.
 
+For production on AWS, store the same variables as a JSON object in Secrets Manager
+and use the normal AWS credential chain (instance role, task role, or workload
+identity). The wrapper allowlists environment keys and never prints the returned
+secret:
+
+```bash
+./scripts/scan-with-aws-secrets.py \
+  --secret-id prod/secman/web-check -- \
+  https://example.com --scan-mode both --format json --fail-on none
+```
+
 ## Development and verification
 
 The repository intentionally keeps Python source files directly under `src/`; the build
@@ -222,17 +416,25 @@ mock adapters; they do not require a live target, MariaDB instance, or SecMan de
 
 ## Documentation
 
+- [CLI reference and troubleshooting](docs/CLI.md)
+- [Architecture and code guide](docs/ARCHITECTURE.md)
+- [Architecture review and capability roadmap](docs/ARCHITECTURE_REVIEW.md)
 - [Checks and severities](docs/CHECKS.md)
 - [Configuration reference](docs/CONFIGURATION.md)
 - [Safety and authorization](docs/SAFETY.md)
 - [Report formats](docs/REPORTS.md)
 - [MariaDB setup](docs/DATABASE.md)
 - [SecMan integration](docs/SECMAN.md)
+- [AI agent and image privacy](docs/AI_AGENT.md)
+- [Coverage matrix](docs/COVERAGE.md)
+- [Implementation status](docs/IMPLEMENTATION.md)
+- [Detection evaluation and measurements](docs/EVALUATION.md)
 
 ## Limitations
 
-- No crawling, discovery, authentication testing, browser execution, exploitation,
-  brute force, or arbitrary fuzzing.
+- Crawling and AI-directed active checks require explicit flags. Authentication testing,
+  exploitation, brute force, and arbitrary fuzzing are not implemented. Browser requests
+  pass through the pinned HTTP collector within the selected origin scope.
 - Active findings use strong bounded signatures but may still require human validation.
 - HTTPS targets use SSLyze for the documented TLS capabilities; unavailable individual
   capabilities make the target partial instead of silently clean.

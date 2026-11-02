@@ -20,3 +20,15 @@ def test_finding_create_normalizes_an_aware_timestamp_to_utc() -> None:
     )
 
     assert finding.created_at == datetime(2026, 9, 9, 12, 0, tzinfo=UTC)
+
+
+def test_finding_identity_and_url_do_not_retain_query_values() -> None:
+    first = Finding.create(
+        "WEB-TEST", "https://example.com/path?token=secret-one", Severity.LOW, "test"
+    )
+    second = Finding.create(
+        "WEB-TEST", "https://example.com/path?token=secret-two", Severity.LOW, "test"
+    )
+
+    assert first.url == "https://example.com/path"
+    assert first.external_id == second.external_id

@@ -368,6 +368,14 @@ _CATALOGUE = (
         0.95,
     ),
     Rule(
+        "WEB-ACTIVE-OPEN-REDIRECT",
+        Severity.MEDIUM,
+        "Redirect target follows untrusted next parameter",
+        "A fixed inert next parameter was returned as an external redirect destination.",
+        "Restrict redirect destinations to trusted paths or an explicit origin allowlist.",
+        0.9,
+    ),
+    Rule(
         "WEB-TLS-PROTOCOL-SSL-2",
         Severity.CRITICAL,
         "SSL 2.0 is supported",

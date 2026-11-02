@@ -1,0 +1,347 @@
+{
+  "version": 1,
+  "cases": [
+    {
+      "id": "hsts-vulnerable",
+      "class": "hsts",
+      "label": "vulnerable",
+      "eligible": [
+        "WEB-HEADER-HSTS-MISSING"
+      ],
+      "expected": [
+        "WEB-HEADER-HSTS-MISSING"
+      ],
+      "headers": []
+    },
+    {
+      "id": "hsts-safe",
+      "class": "hsts",
+      "label": "safe",
+      "eligible": [
+        "WEB-HEADER-HSTS-MISSING"
+      ],
+      "expected": [],
+      "headers": [
+        [
+          "strict-transport-security",
+          "max-age=31536000; includeSubDomains"
+        ]
+      ]
+    },
+    {
+      "id": "csp-vulnerable",
+      "class": "csp",
+      "label": "vulnerable",
+      "eligible": [
+        "WEB-HEADER-CSP-UNSAFE"
+      ],
+      "expected": [
+        "WEB-HEADER-CSP-UNSAFE"
+      ],
+      "headers": [
+        [
+          "content-type",
+          "text/html"
+        ],
+        [
+          "content-security-policy",
+          "script-src * 'unsafe-inline' 'unsafe-eval'"
+        ]
+      ]
+    },
+    {
+      "id": "csp-safe",
+      "class": "csp",
+      "label": "safe",
+      "eligible": [
+        "WEB-HEADER-CSP-UNSAFE"
+      ],
+      "expected": [],
+      "headers": [
+        [
+          "content-type",
+          "text/html"
+        ],
+        [
+          "content-security-policy",
+          "default-src 'none'; script-src 'nonce-fixture'"
+        ]
+      ]
+    },
+    {
+      "id": "cookie-vulnerable",
+      "class": "cookies",
+      "label": "vulnerable",
+      "eligible": [
+        "WEB-COOKIE-SECURE-MISSING"
+      ],
+      "expected": [
+        "WEB-COOKIE-SECURE-MISSING"
+      ],
+      "headers": [
+        [
+          "set-cookie",
+          "session=<redacted>; HttpOnly; SameSite=Strict"
+        ]
+      ]
+    },
+    {
+      "id": "cookie-safe",
+      "class": "cookies",
+      "label": "safe",
+      "eligible": [
+        "WEB-COOKIE-SECURE-MISSING"
+      ],
+      "expected": [],
+      "headers": [
+        [
+          "set-cookie",
+          "session=<redacted>; Secure; HttpOnly; SameSite=Strict"
+        ]
+      ]
+    },
+    {
+      "id": "cors-vulnerable",
+      "class": "cors",
+      "label": "vulnerable",
+      "eligible": [
+        "WEB-CORS-WILDCARD-CREDENTIALS"
+      ],
+      "expected": [
+        "WEB-CORS-WILDCARD-CREDENTIALS"
+      ],
+      "headers": [
+        [
+          "access-control-allow-origin",
+          "*"
+        ],
+        [
+          "access-control-allow-credentials",
+          "true"
+        ]
+      ]
+    },
+    {
+      "id": "cors-safe",
+      "class": "cors",
+      "label": "safe",
+      "eligible": [
+        "WEB-CORS-WILDCARD-CREDENTIALS"
+      ],
+      "expected": [],
+      "headers": [
+        [
+          "access-control-allow-origin",
+          "https://trusted.example"
+        ]
+      ]
+    },
+    {
+      "id": "mixed-vulnerable",
+      "class": "mixed-content",
+      "label": "vulnerable",
+      "eligible": [
+        "WEB-CONTENT-MIXED-ACTIVE"
+      ],
+      "expected": [
+        "WEB-CONTENT-MIXED-ACTIVE"
+      ],
+      "headers": [
+        [
+          "content-type",
+          "text/html"
+        ]
+      ],
+      "body": "<script src='http://insecure.example/app.js'></script>"
+    },
+    {
+      "id": "mixed-safe",
+      "class": "mixed-content",
+      "label": "safe",
+      "eligible": [
+        "WEB-CONTENT-MIXED-ACTIVE"
+      ],
+      "expected": [],
+      "headers": [
+        [
+          "content-type",
+          "text/html"
+        ]
+      ],
+      "body": "<script src='https://trusted.example/app.js'></script>"
+    },
+    {
+      "id": "component-vulnerable",
+      "class": "components",
+      "label": "vulnerable",
+      "eligible": [
+        "WEB-COMPONENT-CVE-2020-11022",
+        "WEB-COMPONENT-CVE-2020-11023"
+      ],
+      "expected": [
+        "WEB-COMPONENT-CVE-2020-11022",
+        "WEB-COMPONENT-CVE-2020-11023"
+      ],
+      "headers": [
+        [
+          "content-type",
+          "text/html"
+        ]
+      ],
+      "body": "<script src='/jquery-3.4.1.js'></script>"
+    },
+    {
+      "id": "component-safe",
+      "class": "components",
+      "label": "safe",
+      "eligible": [
+        "WEB-COMPONENT-CVE-2020-11022",
+        "WEB-COMPONENT-CVE-2020-11023"
+      ],
+      "expected": [],
+      "headers": [
+        [
+          "content-type",
+          "text/html"
+        ]
+      ],
+      "body": "<script src='/jquery-3.7.1.js'></script>"
+    },
+    {
+      "id": "directory-listing-vulnerable",
+      "class": "directory-listing",
+      "label": "vulnerable",
+      "eligible": [
+        "WEB-CONTENT-DIRECTORY-LISTING"
+      ],
+      "expected": [
+        "WEB-CONTENT-DIRECTORY-LISTING"
+      ],
+      "headers": [
+        [
+          "content-type",
+          "text/html"
+        ]
+      ],
+      "body": "<title>Index of /backup</title><a href=\"../\">Parent directory</a>"
+    },
+    {
+      "id": "directory-listing-safe",
+      "class": "directory-listing",
+      "label": "safe",
+      "eligible": [
+        "WEB-CONTENT-DIRECTORY-LISTING"
+      ],
+      "expected": [],
+      "headers": [
+        [
+          "content-type",
+          "text/html"
+        ]
+      ],
+      "body": "<title>Index of /manual</title><p>Documentation page</p>"
+    },
+    {
+      "id": "debug-disclosure-vulnerable",
+      "class": "debug-disclosure",
+      "label": "vulnerable",
+      "eligible": [
+        "WEB-CONTENT-DEBUG-ERROR"
+      ],
+      "expected": [
+        "WEB-CONTENT-DEBUG-ERROR"
+      ],
+      "headers": [
+        [
+          "content-type",
+          "text/html"
+        ]
+      ],
+      "body": "Traceback (most recent call last):\n  File \"fixture.py\", line 1\nValueError: synthetic"
+    },
+    {
+      "id": "debug-disclosure-safe",
+      "class": "debug-disclosure",
+      "label": "safe",
+      "eligible": [
+        "WEB-CONTENT-DEBUG-ERROR"
+      ],
+      "expected": [],
+      "headers": [
+        [
+          "content-type",
+          "text/html"
+        ]
+      ],
+      "body": "<p>Documentation mentions Traceback (most recent call last): without a stack trace.</p>"
+    },
+    {
+      "id": "insecure-forms-vulnerable",
+      "class": "insecure-forms",
+      "label": "vulnerable",
+      "eligible": [
+        "WEB-CONTENT-INSECURE-FORM"
+      ],
+      "expected": [
+        "WEB-CONTENT-INSECURE-FORM"
+      ],
+      "headers": [
+        [
+          "content-type",
+          "text/html"
+        ]
+      ],
+      "body": "<form action=\"http://example.com/login\"><input type=\"password\"></form>"
+    },
+    {
+      "id": "insecure-forms-safe",
+      "class": "insecure-forms",
+      "label": "safe",
+      "eligible": [
+        "WEB-CONTENT-INSECURE-FORM"
+      ],
+      "expected": [],
+      "headers": [
+        [
+          "content-type",
+          "text/html"
+        ]
+      ],
+      "body": "<form action=\"https://example.com/login\"><input type=\"password\"></form>"
+    },
+    {
+      "id": "secret-signatures-vulnerable",
+      "class": "secret-signatures",
+      "label": "vulnerable",
+      "eligible": [
+        "WEB-CONTENT-SECRET"
+      ],
+      "expected": [
+        "WEB-CONTENT-SECRET"
+      ],
+      "headers": [
+        [
+          "content-type",
+          "text/html"
+        ]
+      ],
+      "body": "-----BEGIN PRIVATE KEY-----\nSYNTHETIC_NON_KEY_MATERIAL\n-----END PRIVATE KEY-----"
+    },
+    {
+      "id": "secret-signatures-safe",
+      "class": "secret-signatures",
+      "label": "safe",
+      "eligible": [
+        "WEB-CONTENT-SECRET"
+      ],
+      "expected": [],
+      "headers": [
+        [
+          "content-type",
+          "text/html"
+        ]
+      ],
+      "body": "-----BEGIN PRIVATE KEY-----\n-----END PRIVATE KEY-----"
+    }
+  ]
+}

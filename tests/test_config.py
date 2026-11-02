@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from secman_web_check.config import load_config
+from secman_web_check.config import ScannerConfig, load_config
 
 
 def test_cli_values_override_environment_and_toml(tmp_path: Path) -> None:
@@ -29,3 +29,10 @@ def test_toml_rejects_fractional_integer_configuration(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="concurrency must be an integer"):
         load_config(path, {})
+
+
+@pytest.mark.parametrize("value", [float("inf"), float("nan"), 0, -1])
+@pytest.mark.parametrize("field", ["request_timeout_seconds", "target_timeout_seconds"])
+def test_deadline_configuration_must_be_finite_positive(field, value):
+    with pytest.raises(ValueError, match="timeouts"):
+        ScannerConfig(**{field: value})

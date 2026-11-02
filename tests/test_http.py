@@ -10,7 +10,13 @@ import pytest
 from httpcore._backends.base import NetworkBackend, NetworkStream
 
 from secman_web_check.config import ScannerConfig
-from secman_web_check.http import CollectionError, HttpCollector, PinnedNetworkBackend
+from secman_web_check.http import (
+    CollectionError,
+    HttpCollector,
+    PinnedNetworkBackend,
+    RequestBudget,
+    pinned_transport,
+)
 from secman_web_check.targets import AddressDenied, normalize_target
 
 
@@ -112,6 +118,41 @@ def test_same_host_redirect_resolves_again_and_blocks_rebinding():
     collector = HttpCollector(resolver=resolver, network_backend=backend)
     with pytest.raises(AddressDenied):
         collector.collect(normalize_target("https://example.com"))
+    assert len(backend.dials) == 1
+
+
+def test_browser_single_hop_never_releases_unapproved_redirect():
+    backend = FakeBackend(response(302, [("Location", "https://other.example/private")]))
+    collector, calls = make_collector(backend)
+    scoped = collector.with_allowed_origins(frozenset({"https://example.com"}))
+
+    with pytest.raises(CollectionError):
+        scoped.collect_one(normalize_target("https://example.com"))
+
+    assert len(backend.dials) == 1
+    assert calls == ["example.com"]
+
+
+def test_browser_single_hop_keeps_dial_pinned():
+    backend = FakeBackend(response(200, [("Content-Type", "text/html")], b"<h1>ok</h1>"))
+    collector, _ = make_collector(backend)
+
+    evidence, redirect = collector.collect_one(normalize_target("https://example.com"))
+
+    assert redirect is None
+    assert evidence.body == b"<h1>ok</h1>"
+    assert [dial[0] for dial in backend.dials] == ["93.184.216.34"]
+
+
+def test_request_budget_counts_redirect_hops_before_dial():
+    backend = FakeBackend(response(302, [("Location", "/next")]))
+    collector, _ = make_collector(backend)
+    budget = RequestBudget(1, 10_000)
+
+    with pytest.raises(CollectionError, match="budget"):
+        collector.with_budget(budget).collect(normalize_target("https://example.com/"))
+
+    assert budget.count == 1
     assert len(backend.dials) == 1
 
 
@@ -327,6 +368,11 @@ def test_backend_rejects_empty_or_nonliteral_pin(addresses):
         PinnedNetworkBackend(normalize_target("https://example.com"), addresses)
 
 
+def test_public_pinned_transport_rejects_nonliteral_addresses():
+    with pytest.raises(AddressDenied):
+        pinned_transport(normalize_target("https://example.com"), ("example.com",))
+
+
 def test_backend_cannot_dial_unix_socket():
     backend = PinnedNetworkBackend(normalize_target("https://example.com"), ("1.1.1.1",))
     with pytest.raises(AddressDenied):
@@ -383,3 +429,69 @@ def test_credential_suffixes_preserve_noncredential_security_headers():
     collector, _ = make_collector(backend)
     result = collector.collect(normalize_target("https://example.com"))[-1]
     assert all((name.lower(), value) in result.headers for name, value in headers)
+
+
+@pytest.mark.parametrize("browser", [False, True])
+@pytest.mark.parametrize(
+    "payload",
+    [
+        b"HTTP/1.1 200 OK\r\nX-Slow: drip\r\nContent-Length: 10\r\n\r\n0123456789",
+        b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n1\r\nx\r\n0\r\n\r\n",
+    ],
+)
+def test_absolute_deadline_stops_header_and_body_drip(monkeypatch, browser, payload):
+    clock = [0.0]
+    monkeypatch.setattr("secman_web_check.http.monotonic", lambda: clock[0])
+    observed = []
+    original = FakeStream.read
+
+    def drip(self, max_bytes, timeout=None):
+        observed.append(timeout)
+        clock[0] += 0.2
+        return original(self, 1, timeout)
+
+    monkeypatch.setattr(FakeStream, "read", drip)
+    backend = FakeBackend(payload)
+    collector, _ = make_collector(backend, request_timeout_seconds=1.0)
+    with pytest.raises(CollectionError):
+        (collector.collect_one if browser else collector.collect)(
+            normalize_target("https://example.com")
+        )
+    assert clock[0] <= 1.2
+    assert observed[-1] < observed[0]
+    assert backend.streams[0].closed
+
+
+def test_collection_deadline_is_shared_across_redirects(monkeypatch):
+    clock = [0.0]
+    monkeypatch.setattr("secman_web_check.http.monotonic", lambda: clock[0])
+    original = FakeStream.read
+    observed = []
+
+    def advance(self, max_bytes, timeout=None):
+        observed.append(timeout)
+        clock[0] += 0.6
+        return original(self, max_bytes, timeout)
+
+    monkeypatch.setattr(FakeStream, "read", advance)
+    backend = FakeBackend(response(302, [("Location", "/next")]), response())
+    collector, _ = make_collector(backend, request_timeout_seconds=1.0)
+    with pytest.raises(CollectionError):
+        collector.collect(normalize_target("https://example.com"))
+    assert observed[1] < 0.5
+    assert all(stream.closed for stream in backend.streams)
+
+
+def test_target_deadline_survives_collector_clones(monkeypatch):
+    monkeypatch.setattr("secman_web_check.http.monotonic", lambda: 10.0)
+    backend = FakeBackend(response())
+    collector, _ = make_collector(backend)
+    clone = (
+        collector.with_deadline(9.0)
+        .with_max_body_bytes(100)
+        .with_max_redirects(1)
+        .with_budget(RequestBudget(2, 1))
+    )
+    with pytest.raises(CollectionError, match="deadline"):
+        clone.collect(normalize_target("https://example.com"))
+    assert not backend.dials
