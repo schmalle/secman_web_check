@@ -131,7 +131,7 @@ def test_real_sslyze_certificate_handshakes_share_and_release_socket_leases(monk
             assert any(item.rule_id == "WEB-TLS-CERTIFICATE-UNTRUSTED" for item in findings)
             assert traffic.metrics()["tls"] >= 1
             assert traffic.metrics()["peak"] == 1
-            assert not traffic.leases
+            assert traffic.ledger.lease_count() == 0
         finally:
             server.shutdown()
             thread.join(timeout=2)

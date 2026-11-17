@@ -18,90 +18,136 @@ class TrafficDenied(ValueError):
     """Cancelled, exhausted or expired run admission; safe for public errors."""
 
 
+_WAIT = "\0wait"
+
+
+class _Ledger:
+    """Admission state. Each method is atomic and runs in one thread of the manager.
+
+    The lock is only ever held inside a single call, so a worker killed mid-call cannot
+    leave it held, which a lock acquired and released by separate client calls could.
+    """
+
+    def __init__(self, config: ScannerConfig) -> None:
+        self._config = config
+        self._lock = threading.Lock()
+        self._state: dict[str, Any] = {}
+        self._leases: dict[str, tuple[int, str, str, float]] = {}
+
+    def try_admit(
+        self, key: str, pid: int, origin: str, engine: str, deadline: float
+    ) -> str | None:
+        """Return None when admitted, ``_WAIT`` to retry, or a public denial message."""
+        config = self._config
+        now = monotonic()
+        with self._lock:
+            state = self._state
+            if state.get("cancelled", False):
+                return "Run cancelled"
+            if now >= deadline:
+                return "Traffic admission deadline exceeded"
+            for name, value in list(self._leases.items()):
+                if value[3] <= now:
+                    del self._leases[name]
+            count = int(state.get("operations", 0))
+            if count >= config.max_operations:
+                return "Run operation budget exhausted"
+            if engine == "provider" and int(state.get("provider", 0)) >= config.max_provider_calls:
+                return "Provider call budget exhausted"
+            scheduled = max(float(state.get("next", 0.0)), float(state.get("next:" + origin, 0.0)))
+            if (
+                len(self._leases) < config.concurrency
+                and sum(value[1] == origin for value in self._leases.values())
+                < config.per_origin_concurrency
+                and now >= scheduled
+            ):
+                self._leases[key] = (pid, origin, engine, deadline)
+                state["next"] = now + 1.0 / config.global_requests_per_second
+                state["next:" + origin] = now + 1.0 / config.requests_per_second
+                state["operations"] = count + 1
+                state[engine] = int(state.get(engine, 0)) + 1
+                state["peak"] = max(int(state.get("peak", 0)), len(self._leases))
+                return None
+        return _WAIT
+
+    def release(self, key: str) -> None:
+        with self._lock:
+            self._leases.pop(key, None)
+
+    def release_owner(self, pid: int) -> None:
+        with self._lock:
+            for key, value in list(self._leases.items()):
+                if value[0] == pid:
+                    del self._leases[key]
+
+    def lease_count(self) -> int:
+        with self._lock:
+            return len(self._leases)
+
+    def cancel(self) -> None:
+        with self._lock:
+            self._state["cancelled"] = True
+
+    def cancelled(self) -> bool:
+        with self._lock:
+            return bool(self._state.get("cancelled", False))
+
+    def metrics(self) -> dict[str, int]:
+        with self._lock:
+            return {
+                key: int(self._state.get(key, 0))
+                for key in ("operations", "http", "tls", "provider", "external", "peak")
+            }
+
+
+class _TrafficManager(SyncManager):
+    pass
+
+
+_TrafficManager.register("Ledger", _Ledger)
+
+
 class TrafficController:
-    def __init__(
-        self, config: ScannerConfig, state: Any = None, lock: Any = None, leases: Any = None
-    ) -> None:
+    def __init__(self, config: ScannerConfig, ledger: Any = None) -> None:
         self.config = config
-        self.state: Any = {} if state is None else state
-        self.lock: Any = threading.RLock() if lock is None else lock
-        self.leases: Any = {} if leases is None else leases
+        self.ledger: Any = _Ledger(config) if ledger is None else ledger
 
     @contextmanager
     def admit(self, origin: str, engine: str, deadline: float | None = None) -> Iterator[None]:
         deadline = deadline or monotonic() + self.config.target_timeout_seconds
         key = "lease:" + uuid4().hex
         while True:
-            now = monotonic()
-            with self.lock:
-                if self.state.get("cancelled", False):
-                    raise TrafficDenied("Run cancelled")
-                if now >= deadline:
-                    raise TrafficDenied("Traffic admission deadline exceeded")
-                leases = []
-                for name, value in list(self.leases.items()):
-                    if value[3] <= now:
-                        del self.leases[name]
-                    else:
-                        leases.append(value)
-                count = int(self.state.get("operations", 0))
-                if count >= self.config.max_operations:
-                    raise TrafficDenied("Run operation budget exhausted")
-                if (
-                    engine == "provider"
-                    and int(self.state.get("provider", 0)) >= self.config.max_provider_calls
-                ):
-                    raise TrafficDenied("Provider call budget exhausted")
-                scheduled = max(
-                    float(self.state.get("next", 0.0)), float(self.state.get("next:" + origin, 0.0))
-                )
-                if (
-                    len(leases) < self.config.concurrency
-                    and sum(value[1] == origin for value in leases)
-                    < self.config.per_origin_concurrency
-                    and now >= scheduled
-                ):
-                    self.leases[key] = (os.getpid(), origin, engine, deadline)
-                    self.state["next"] = now + 1.0 / self.config.global_requests_per_second
-                    self.state["next:" + origin] = now + 1.0 / self.config.requests_per_second
-                    self.state["operations"] = count + 1
-                    self.state[engine] = int(self.state.get(engine, 0)) + 1
-                    self.state["peak"] = max(int(self.state.get("peak", 0)), len(leases) + 1)
-                    break
+            verdict = self.ledger.try_admit(key, os.getpid(), origin, engine, deadline)
+            if verdict is None:
+                break
+            if verdict != _WAIT:
+                raise TrafficDenied(verdict)
             sleep(min(0.05, max(0.001, deadline - monotonic())))
         try:
             yield
         finally:
-            with self.lock:
-                self.leases.pop(key, None)
+            self.ledger.release(key)
 
     def release_owner(self, pid: int) -> None:
         """Reclaim leases of a worker killed while inside an adapter."""
-        with self.lock:
-            for key, value in list(self.leases.items()):
-                if value[0] == pid:
-                    del self.leases[key]
+        self.ledger.release_owner(pid)
 
     @property
     def cancelled(self) -> bool:
-        return bool(self.state.get("cancelled", False))
+        return bool(self.ledger.cancelled())
 
     def cancel(self) -> None:
-        with self.lock:
-            self.state["cancelled"] = True
+        self.ledger.cancel()
 
     def metrics(self) -> dict[str, int]:
-        with self.lock:
-            return {
-                key: int(self.state.get(key, 0))
-                for key in ("operations", "http", "tls", "provider", "external", "peak")
-            }
+        return dict(self.ledger.metrics())
 
 
 @contextmanager
 def traffic_run(config: ScannerConfig) -> Iterator[TrafficController]:
-    with SyncManager() as manager:
-        controller = TrafficController(config, manager.dict(), manager.RLock(), manager.dict())
+    with _TrafficManager() as manager:
+        ledger: Any = getattr(manager, "Ledger")(config)  # noqa: B009 - registered at import
+        controller = TrafficController(config, ledger)
         try:
             yield controller
         finally:

@@ -97,9 +97,51 @@ def test_distinct_origins_share_global_connection_ceiling_and_dead_worker_leases
         for future in futures:
             future.result(timeout=2)
     assert controller.metrics()["peak"] == 1
-    controller.leases["lease:dead"] = (999999, "fixture", "external", time.monotonic() + 100)
-    controller.release_owner(999999)
-    assert "lease:dead" not in controller.leases
+    config_one = ScannerConfig(
+        concurrency=1, requests_per_second=1000, global_requests_per_second=1000
+    )
+    ledger = TrafficController(config_one).ledger
+    assert (
+        ledger.try_admit("lease:dead", 999999, "fixture", "external", time.monotonic() + 100)
+        is None
+    )
+    assert ledger.lease_count() == 1
+    ledger.release_owner(999999)
+    assert ledger.lease_count() == 0
+
+
+def _hammer_worker(controller):
+    while True:
+        with controller.admit("https://fixture.example:443", "http"):
+            pass
+
+
+def test_killed_workers_never_leave_the_shared_controller_blocked():
+    config = ScannerConfig(
+        concurrency=8,
+        requests_per_second=1000,
+        global_requests_per_second=1000,
+        per_origin_concurrency=8,
+        max_operations=10**9,
+    )
+    context = multiprocessing.get_context("spawn")
+    with traffic_run(config) as controller:
+        for _ in range(3):
+            processes = [
+                context.Process(target=_hammer_worker, args=(controller,)) for _ in range(8)
+            ]
+            for process in processes:
+                process.start()
+            time.sleep(0.5)
+            for process in processes:
+                process.kill()
+            for process in processes:
+                process.join(timeout=10)
+                controller.release_owner(process.pid)
+        started = time.monotonic()
+        with controller.admit("https://other.example:443", "http", time.monotonic() + 10):
+            pass
+        assert time.monotonic() - started < 5
 
 
 def _admit(controller, origin):
