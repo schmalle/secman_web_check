@@ -69,7 +69,9 @@ These counters do not count encrypted requests or individual TLS messages inside
    check; JavaScript collection follows the collector's current origin policy.
 5. Directory discovery and external tools run only after a final HTTP 200 response.
    Optional JavaScript inventory inspects references on the initial collected page.
-   TLS checks use the effective target. Component detection uses response metadata and
+   TLS checks use the effective target when it keeps the configured host; a redirect to
+   another host (for example an identity provider) is TLS-checked on the configured
+   host instead. Component detection uses response metadata and
    HTML references, with local version matching against bundled advisories.
 6. Optional crawling applies passive checks and component detection to collected child
    pages. It does not run every active probe, TLS scan, or JS inventory on every page.

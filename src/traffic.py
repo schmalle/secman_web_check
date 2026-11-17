@@ -54,7 +54,13 @@ class _Ledger:
                 return "Run operation budget exhausted"
             if engine == "provider" and int(state.get("provider", 0)) >= config.max_provider_calls:
                 return "Provider call budget exhausted"
-            scheduled = max(float(state.get("next", 0.0)), float(state.get("next:" + origin, 0.0)))
+            # TLS handshakes are paced apart from HTTP requests to the same origin.
+            pace_key, origin_rate = (
+                ("next:tls:" + origin, config.tls_connections_per_second)
+                if engine == "tls"
+                else ("next:" + origin, config.requests_per_second)
+            )
+            scheduled = max(float(state.get("next", 0.0)), float(state.get(pace_key, 0.0)))
             if (
                 len(self._leases) < config.concurrency
                 and sum(value[1] == origin for value in self._leases.values())
@@ -63,7 +69,7 @@ class _Ledger:
             ):
                 self._leases[key] = (pid, origin, engine, deadline)
                 state["next"] = now + 1.0 / config.global_requests_per_second
-                state["next:" + origin] = now + 1.0 / config.requests_per_second
+                state[pace_key] = now + 1.0 / origin_rate
                 state["operations"] = count + 1
                 state[engine] = int(state.get(engine, 0)) + 1
                 state["peak"] = max(int(state.get("peak", 0)), len(self._leases))

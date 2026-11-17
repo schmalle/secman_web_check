@@ -5,7 +5,7 @@ the `[scan]` table selected with `--config`, then built-in safe defaults.
 
 | TOML key | Environment variable | Default | Constraint |
 | --- | --- | ---: | --- |
-| `concurrency` | `SECMAN_WEB_CHECK_CONCURRENCY` | `20` | integer >= 1 |
+| `concurrency` | `SECMAN_WEB_CHECK_CONCURRENCY` | `40` | integer >= 1 |
 | `active` | `SECMAN_WEB_CHECK_ACTIVE` | `false` | boolean |
 | `allow_private_targets` | `SECMAN_WEB_CHECK_ALLOW_PRIVATE_TARGETS` | `false` | boolean |
 | `max_body_bytes` | `SECMAN_WEB_CHECK_MAX_BODY_BYTES` | `1048576` | integer >= 1 |
@@ -114,9 +114,10 @@ in-process calls do not interrupt a blocked operating-system resolver.
 | TOML key | Environment variable | Default |
 | --- | --- | ---: |
 | `requests_per_second` | `SECMAN_WEB_CHECK_REQUESTS_PER_SECOND` | `1.0` |
-| `global_requests_per_second` | `SECMAN_WEB_CHECK_GLOBAL_REQUESTS_PER_SECOND` | `20.0` |
+| `tls_connections_per_second` | `SECMAN_WEB_CHECK_TLS_CONNECTIONS_PER_SECOND` | `10.0` |
+| `global_requests_per_second` | `SECMAN_WEB_CHECK_GLOBAL_REQUESTS_PER_SECOND` | `400.0` |
 | `per_origin_concurrency` | `SECMAN_WEB_CHECK_PER_ORIGIN_CONCURRENCY` | `1` |
-| `max_operations` | `SECMAN_WEB_CHECK_MAX_OPERATIONS` | `10000` |
+| `max_operations` | `SECMAN_WEB_CHECK_MAX_OPERATIONS` | `500000` |
 | `max_provider_calls` | `SECMAN_WEB_CHECK_MAX_PROVIDER_CALLS` | `50` |
 | `tls_vulnerabilities` | `SECMAN_WEB_CHECK_TLS_VULNERABILITIES` | `false` |
 

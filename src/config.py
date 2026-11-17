@@ -14,7 +14,7 @@ _PREFIX = "SECMAN_WEB_CHECK_"
 
 @dataclass(frozen=True, slots=True)
 class ScannerConfig:
-    concurrency: int = 20
+    concurrency: int = 40
     active: bool = False
     allow_private_targets: bool = False
     max_body_bytes: int = 1_048_576
@@ -24,9 +24,11 @@ class ScannerConfig:
     request_timeout_seconds: float = 60.0
     target_timeout_seconds: float = 300.0
     requests_per_second: float = 1.0
-    global_requests_per_second: float = 20.0
+    # SSLyze needs ~540 handshakes per HTTPS host; this pace fits them in the deadline.
+    tls_connections_per_second: float = 10.0
+    global_requests_per_second: float = 400.0
     per_origin_concurrency: int = 1
-    max_operations: int = 10000
+    max_operations: int = 500_000
     max_provider_calls: int = 50
     tls_vulnerabilities: bool = False
 
@@ -47,6 +49,7 @@ class ScannerConfig:
                 self.request_timeout_seconds,
                 self.target_timeout_seconds,
                 self.requests_per_second,
+                self.tls_connections_per_second,
                 self.global_requests_per_second,
             )
         ):
@@ -83,6 +86,7 @@ def _coerce(name: str, value: object) -> bool | int | float:
         "request_timeout_seconds",
         "target_timeout_seconds",
         "requests_per_second",
+        "tls_connections_per_second",
         "global_requests_per_second",
     }:
         if isinstance(value, (str, int, float)) and not isinstance(value, bool):

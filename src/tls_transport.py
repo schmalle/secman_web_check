@@ -12,9 +12,17 @@ from typing import Any
 from .config import ScannerConfig
 from .http import target_origin
 from .targets import AddressDenied, AddressPolicy, NormalizedTarget, resolve_allowed
-from .traffic import TrafficController
+from .traffic import TrafficController, TrafficDenied
 
 _PATCH_LOCK = threading.Lock()
+
+
+class TlsConnectionDenied(OSError):
+    """A refused TLS socket, typed as OSError so SSLyze records a failed connection.
+
+    SSLyze's worker threads catch only socket errors; any other exception kills the
+    thread, prints a traceback and leaves the scan waiting until the target deadline.
+    """
 
 
 class _LeasedSocket(socket.socket):
@@ -45,15 +53,21 @@ def tls_connections(
 
     def connect(server_location: Any, network_timeout: int) -> socket.socket:
         location = server_location
-        addresses = resolve_allowed(target, AddressPolicy.from_config(config))
+        try:
+            addresses = resolve_allowed(target, AddressPolicy.from_config(config))
+        except AddressDenied:
+            raise TlsConnectionDenied("TLS target resolved to a denied address") from None
         if (
             location.ip_address not in addresses
             or location.port != (target.port or 443)
             or location.hostname != target.host
         ):
-            raise AddressDenied("TLS connection no longer matches approved DNS snapshot")
+            raise TlsConnectionDenied("TLS connection no longer matches approved DNS snapshot")
         lease = controller.admit(target_origin(target), "tls", deadline)
-        lease.__enter__()
+        try:
+            lease.__enter__()
+        except TrafficDenied as error:
+            raise TlsConnectionDenied(str(error)) from None
         try:
             raw = socket.create_connection(
                 (location.ip_address, location.port),

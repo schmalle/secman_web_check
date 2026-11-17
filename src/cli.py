@@ -34,7 +34,7 @@ from .external_scanners import SUPPORTED_SCANNERS
 from .intelligence import load_snapshot, update_snapshot
 from .models import ScanRun, Severity, TargetResult, TargetStatus, public_url
 from .orchestrator import scan_all
-from .reports import render_terminal, write_html, write_json, write_sarif
+from .reports import render_terminal, write_csv, write_html, write_json, write_sarif
 from .reports.common import atomic_write
 from .reports.compare import compare_reports
 from .secman import (
@@ -64,8 +64,9 @@ app.add_typer(intel_app, name="intel")
 app.add_typer(audit_app, name="audit")
 app.add_typer(db_app, name="db")
 app.add_typer(history_app, name="history")
-console = Console()
-error_console = Console(stderr=True)
+# soft_wrap keeps every progress/report line on one physical line in redirected logs.
+console = Console(soft_wrap=True)
+error_console = Console(stderr=True, soft_wrap=True)
 
 _FORMATS = {"terminal", "json", "sarif", "html"}
 _DEFAULT_REVIEW_PROMPT = default_prompt_path()
@@ -110,7 +111,7 @@ class _ScanProgress:
             f"[{style}]{result.status.value}[/{style}] · "
             f"{len(result.findings)} findings · {len(result.errors)} errors · {duration:.1f}s"
         )
-        self._progress.update(self._task, completed=completed)
+        self._progress.update(self._task, completed=completed, total=total)
 
     def close(self) -> None:
         self._progress.stop()
@@ -128,6 +129,9 @@ def _write_reports(run: ScanRun, formats: tuple[str, ...], output_dir: Path) -> 
         raise ValueError("output directory is not a directory")
     if "terminal" in formats:
         render_terminal(run, console)
+    # Every run gets a CSV export with one line per finding, whatever --format says.
+    path = write_csv(run, output_dir / f"{run.run_id}.csv")
+    console.print(f"CSV report: {path}")
     if "json" in formats:
         path = write_json(run, output_dir / f"{run.run_id}.json")
         console.print(f"JSON report: {path}")
@@ -288,9 +292,13 @@ def scan(
         typer.Option("--format", "-f", help="Repeat: terminal, json, sarif, html, or all."),
     ] = None,
     output_dir: Annotated[
-        Path,
-        typer.Option("--output-dir", help="Directory for machine-readable reports."),
-    ] = Path("scan-output"),
+        Path | None,
+        typer.Option(
+            "--output-dir",
+            help="Directory for machine-readable reports (default scan-output). "
+            "Given without --format, it writes every report format.",
+        ),
+    ] = None,
     concurrency: Annotated[
         int | None,
         typer.Option("--concurrency", min=1, help="Maximum number of targets scanned at once."),
@@ -442,6 +450,10 @@ def scan(
         float | None,
         typer.Option("--requests-per-second", rich_help_panel="Traffic limits", min=0.01),
     ] = None,
+    tls_connections_per_second: Annotated[
+        float | None,
+        typer.Option("--tls-connections-per-second", rich_help_panel="Traffic limits", min=0.01),
+    ] = None,
     global_requests_per_second: Annotated[
         float | None,
         typer.Option("--global-requests-per-second", rich_help_panel="Traffic limits", min=0.01),
@@ -541,7 +553,9 @@ def scan(
         )
     except (OSError, TargetError, TypeError, ValueError) as error:
         raise typer.BadParameter(str(error)) from error
-    requested = tuple(formats or ("terminal",))
+    # An explicit report directory without --format means the caller wants report files.
+    requested = tuple(formats or (("all",) if output_dir is not None else ("terminal",)))
+    output_dir = output_dir if output_dir is not None else Path("scan-output")
     if "all" in requested:
         requested = ("terminal", "json", "sarif", "html")
     unknown = set(requested) - _FORMATS
@@ -558,6 +572,7 @@ def scan(
             concurrency=concurrency,
             tls_vulnerabilities=True if tls_vulnerabilities else None,
             requests_per_second=requests_per_second,
+            tls_connections_per_second=tls_connections_per_second,
             global_requests_per_second=global_requests_per_second,
             per_origin_concurrency=per_origin_concurrency,
             max_operations=max_operations,
@@ -666,6 +681,8 @@ def scan(
     with traffic_run(scan_config) as traffic:
         security_run: ScanRun | None = None
         if scan_mode in {"security", "both"}:
+            # Redirect destinations have no SecMan subject, so subject-bound runs skip them.
+            follow_redirects = not (push_to_secman or targets_from_secman)
             security_progress = _ScanProgress(
                 "Security scan",
                 len(targets),
@@ -699,10 +716,15 @@ def scan(
                         browser_options=browser_options,
                         api_operations=declared_operations,
                         advisory_snapshot=snapshot,
+                        follow_external_redirects=follow_redirects,
                     )
                 else:
                     security_run = scan_all(
-                        targets, scan_config, progress=security_progress, traffic=traffic
+                        targets,
+                        scan_config,
+                        progress=security_progress,
+                        traffic=traffic,
+                        follow_external_redirects=follow_redirects,
                     )
             finally:
                 security_progress.close()

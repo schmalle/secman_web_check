@@ -4,9 +4,9 @@ import pytest
 from sslyze import ScanCommand
 
 from secman_web_check.config import ScannerConfig
-from secman_web_check.targets import AddressDenied, normalize_target
+from secman_web_check.targets import normalize_target
 from secman_web_check.tls import _INVENTORY_COMMANDS, _VULNERABILITY_COMMANDS, TlsScanner
-from secman_web_check.tls_transport import tls_connections
+from secman_web_check.tls_transport import TlsConnectionDenied, tls_connections
 from secman_web_check.traffic import TrafficController
 
 
@@ -48,9 +48,11 @@ def test_tls_hook_revalidates_every_connection_and_refuses_changed_dns(monkeypat
     original = tls_connection._open_socket_for_direct_connection
     with (
         tls_connections(target, ScannerConfig(), TrafficController(ScannerConfig())),
-        pytest.raises(AddressDenied, match="DNS snapshot"),
+        pytest.raises(TlsConnectionDenied, match="DNS snapshot"),
     ):
         tls_connection._open_socket_for_direct_connection(location, 1)
+    # SSLyze threads only survive OSError; anything else hangs the scan until its deadline.
+    assert issubclass(TlsConnectionDenied, OSError)
     assert tls_connection._open_socket_for_direct_connection is original
 
 

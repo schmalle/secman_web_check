@@ -42,17 +42,28 @@ unsupported schemes and denied addresses are rejected. Quote URLs with shell met
 | `--strict` | off | Reject invalid target-file/CSV lines immediately |
 | `--config PATH` | none | Load TOML `[scan]` settings |
 | `--scan-mode security\|visual\|both` | `security` | Select HTTP/TLS, browser capture, or both passes |
-| `--concurrency INTEGER` | `20` | Target workers and global concurrent connection admissions, minimum 1 |
+| `--concurrency INTEGER` | `40` | Target workers and global concurrent connection admissions, minimum 1 |
 | `--format FORMAT`, `-f FORMAT` | `terminal` | Repeatable `terminal`, `json`, `sarif`, `html`, or `all` |
-| `--output-dir PATH` | `scan-output` | UUID-named local report files |
+| `--output-dir PATH` | `scan-output` | UUID-named local report files; given without `--format`, every format is written |
 | `--fail-on LEVEL` | `high` | `info`, `low`, `medium`, `high`, `critical`, or `none` |
 | `--store-db` | off | Store summaries and full JSON archive in MariaDB |
 | `--push-to-secman` | off | Upload atomic mode-specific snapshots through REST v1 |
+
+Every run also writes `<run-id>.csv` to the output directory, whatever `--format` says: one
+line per finding (newlines inside a value are collapsed to spaces, and values starting with
+`=`, `+`, `-` or `@` are prefixed with `'` so spreadsheets do not evaluate them).
 
 `--format json` writes a JSON file; stdout prints its path, not its contents. Progress
 and warnings go to stderr. JSON schema is `1.3`, SARIF is `2.1.0`. Local reports include
 the coverage manifest/hash, evidence references, check outcomes, analysis provenance,
 script metadata and declared/observed API inventory. Read files for machine processing.
+
+A target whose final redirect lands on another host (for example `www.a.de` →
+`login.b.de`) keeps its TLS check on the configured host. After all listed targets
+finish, each such redirect host is scanned once as an extra target at its root URL, no
+matter how many targets redirected to it, and only if it is not already listed. Extra
+targets are not expanded further. Runs with `--targets-from-secman` or
+`--push-to-secman` skip this, because redirect hosts have no SecMan subject.
 
 ```bash
 secman-web-check scan https://example.com --format all --fail-on none
@@ -116,10 +127,11 @@ provider calls and external proxy connections. Defaults can be overridden in TOM
 
 | Option | Default | Meaning |
 | --- | ---: | --- |
-| `--requests-per-second NUMBER` | `1` | Maximum admission rate per origin |
-| `--global-requests-per-second NUMBER` | `20` | Maximum admission rate across origins |
+| `--requests-per-second NUMBER` | `1` | Maximum HTTP/provider/external admission rate per origin |
+| `--tls-connections-per-second NUMBER` | `10` | Maximum TLS handshake rate per origin (SSLyze needs ~540 per HTTPS host) |
+| `--global-requests-per-second NUMBER` | `400` | Maximum admission rate across origins |
 | `--per-origin-concurrency INTEGER` | `1` | Concurrent admitted connections per origin |
-| `--max-operations INTEGER` | `10000` | Run-wide admission ceiling |
+| `--max-operations INTEGER` | `500000` | Run-wide admission ceiling |
 | `--max-provider-calls INTEGER` | `50` | Shared call ceiling across all AI features |
 
 HTTP redirects consume individual admissions. SSLyze obtains admission for each TCP

@@ -246,3 +246,138 @@ def test_outer_target_worker_preserves_sanitized_denied_target_result():
     assert result.status == TargetStatus.FAILED
     assert not result.complete
     assert "address was denied" in result.errors[0]
+
+
+class RedirectedCollector(FakeCollector):
+    def __init__(self, final_url):
+        super().__init__(b"<html></html>")
+        self.final_url = final_url
+
+    def collect(self, target, method="GET", headers=None):
+        (evidence,) = super().collect(target, method, headers)
+        return (
+            HttpResponseEvidence(
+                request=HttpRequest("GET", self.final_url),
+                status_code=200,
+                headers=(),
+                body=evidence.body,
+                truncated=False,
+                elapsed_seconds=0.0,
+            ),
+        )
+
+
+class RecordingTlsScanner:
+    def __init__(self):
+        self.hosts = []
+
+    def scan(self, target):
+        self.hosts.append((target.scheme, target.host))
+        return TlsEvidence(True), ()
+
+
+@pytest.mark.parametrize(
+    ("configured", "final", "expected"),
+    [
+        (
+            "https://app.example.com/",
+            "https://login.idp.example.net/authorize",
+            ("https", "app.example.com"),
+        ),
+        ("http://app.example.com/", "https://app.example.com/home", ("https", "app.example.com")),
+    ],
+)
+def test_tls_inventory_never_leaves_the_configured_host(configured, final, expected):
+    tls = RecordingTlsScanner()
+    scan_target(
+        normalize_target(configured),
+        ScannerConfig(),
+        collector=RedirectedCollector(final),
+        tls_scanner=tls,
+    )
+    assert tls.hosts == [expected]
+
+
+def _redirected(target, final_url):
+    from secman_web_check.models import ExposureObservation
+
+    now = datetime.now(UTC)
+    return TargetResult(
+        target,
+        TargetStatus.SUCCESS,
+        exposure=ExposureObservation(
+            configured_url=target.url,
+            effective_url=final_url,
+            reachability=Reachability.REACHABLE,
+            http_status=200,
+            redirect_count=1,
+        ),
+        started_at=now,
+        completed_at=now,
+    )
+
+
+def test_external_redirect_destinations_are_scanned_once_per_run(monkeypatch):
+    targets = (
+        normalize_target("https://www.a.example"),
+        normalize_target("https://shop.a.example"),
+        normalize_target("https://own.a.example"),
+        normalize_target("https://listed.c.example"),
+    )
+    finals = {
+        "www.a.example": "https://login.b.example/authorize?state=1",
+        "shop.a.example": "https://login.b.example/other",
+        "own.a.example": "https://own.a.example/home",
+        "listed.c.example": "https://www.a.example/",
+        "login.b.example": "https://login.b.example/",
+    }
+    scanned = []
+
+    def fake_scan(target, _config, **_options):
+        scanned.append(target.url)
+        return _redirected(target, finals[target.host])
+
+    monkeypatch.setattr("secman_web_check.orchestrator._bounded_scan_target", fake_scan)
+    events = []
+    run = scan_all(
+        targets,
+        ScannerConfig(concurrency=2),
+        progress=lambda done, total, _result: events.append((done, total)),
+        follow_external_redirects=True,
+    )
+    assert scanned.count("https://login.b.example/") == 1
+    assert len(scanned) == 5
+    assert [result.target.host for result in run.targets][-1] == "login.b.example"
+    assert events[-1] == (5, 5)
+
+
+def test_external_redirects_are_not_followed_unless_requested(monkeypatch):
+    target = normalize_target("https://www.a.example")
+    monkeypatch.setattr(
+        "secman_web_check.orchestrator._bounded_scan_target",
+        lambda t, _c, **_o: _redirected(t, "https://login.b.example/"),
+    )
+    run = scan_all((target,), ScannerConfig(concurrency=1))
+    assert [result.target.host for result in run.targets] == ["www.a.example"]
+
+
+def test_worker_drops_a_result_the_parent_no_longer_waits_for(monkeypatch):
+    from secman_web_check.orchestrator import _target_worker
+
+    class ClosedPipe:
+        closed = False
+
+        def send(self, _value):
+            raise BrokenPipeError(32, "Broken pipe")
+
+        def close(self):
+            self.closed = True
+
+    monkeypatch.setattr(
+        "secman_web_check.orchestrator.scan_target",
+        lambda target, _config, **_options: _redirected(target, target.url),
+    )
+    monkeypatch.setattr("secman_web_check.orchestrator.os.setsid", lambda: None)
+    pipe = ClosedPipe()
+    _target_worker(pipe, normalize_target("https://www.a.example"), ScannerConfig(), {})
+    assert pipe.closed

@@ -401,3 +401,37 @@ def test_secman_loaded_target_uses_same_asset_binding_for_other_scanner(monkeypa
         terminal_coverage=False,
     )
     assert uploads[1]["completeCoverage"] is False
+
+
+def test_explicit_output_dir_without_format_writes_report_files(monkeypatch, tmp_path):
+    monkeypatch.setattr("secman_web_check.cli.scan_all", clean_run)
+    out = tmp_path / "reports"
+    result = runner.invoke(
+        app, ["scan", "example.com", "--output-dir", str(out), "--fail-on", "none"]
+    )
+    assert result.exit_code == 0, result.output
+    names = sorted(path.name for path in out.iterdir())
+    assert any(name.endswith(".sarif.json") for name in names)
+    assert any(name.endswith(".html") for name in names)
+    assert any(name.endswith(".csv") for name in names)
+    assert any(name.endswith(".json") and not name.endswith(".sarif.json") for name in names)
+
+
+def test_without_output_dir_or_format_only_the_csv_export_is_written(monkeypatch, tmp_path):
+    monkeypatch.setattr("secman_web_check.cli.scan_all", clean_run)
+    monkeypatch.chdir(tmp_path)
+    result = runner.invoke(app, ["scan", "example.com", "--fail-on", "none"])
+    assert result.exit_code == 0, result.output
+    names = [path.name for path in (tmp_path / "scan-output").iterdir()]
+    assert len(names) == 1 and names[0].endswith(".csv")
+
+
+def test_progress_lines_are_never_wrapped_in_logs(monkeypatch, tmp_path):
+    monkeypatch.setattr("secman_web_check.cli.scan_all", clean_run)
+    host = "a-very-long-hostname-for-wrapping-checks." + "x" * 60 + ".example"
+    result = runner.invoke(app, ["scan", host, "--output-dir", str(tmp_path), "--fail-on", "none"])
+    assert result.exit_code == 0, result.output
+    progress = [line for line in result.output.splitlines() if line.startswith("[1/1]")]
+    assert len(progress) == 1
+    assert progress[0].rstrip().endswith("s")
+    assert host in progress[0]

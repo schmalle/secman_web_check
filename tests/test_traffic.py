@@ -147,3 +147,30 @@ def test_killed_workers_never_leave_the_shared_controller_blocked():
 def _admit(controller, origin):
     with controller.admit(origin, "http"):
         time.sleep(0.02)
+
+
+def test_tls_handshakes_use_their_own_per_origin_pace():
+    config = ScannerConfig(
+        requests_per_second=1, tls_connections_per_second=50, global_requests_per_second=1000
+    )
+    controller = TrafficController(config)
+    started = time.monotonic()
+    for _ in range(5):
+        with controller.admit("https://fixture.example:443", "tls"):
+            pass
+    assert time.monotonic() - started < 0.5
+    with controller.admit("https://fixture.example:443", "http"):
+        pass
+    started = time.monotonic()
+    with controller.admit("https://fixture.example:443", "http"):
+        pass
+    assert time.monotonic() - started >= 0.9
+
+
+def test_default_budgets_fit_a_full_tls_inventory_within_the_target_deadline():
+    config = ScannerConfig()
+    tls_inventory_connections = 540
+    assert tls_inventory_connections / config.tls_connections_per_second < (
+        config.target_timeout_seconds / 2
+    )
+    assert config.max_operations >= 400 * (tls_inventory_connections + 10)

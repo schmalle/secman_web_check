@@ -50,7 +50,13 @@ from .models import (
     public_url,
 )
 from .provider import POLICY_VERSION
-from .targets import AddressDenied, AddressPolicy, NormalizedTarget, normalize_target
+from .targets import (
+    AddressDenied,
+    AddressPolicy,
+    NormalizedTarget,
+    TargetError,
+    normalize_target,
+)
 from .tls import TlsScanner
 from .traffic import TrafficController, traffic_run
 
@@ -273,11 +279,13 @@ def scan_target(
 
     tls_failed = False
     tls_findings: tuple[Finding, ...] = ()
+    # A redirect to another host (e.g. an identity provider) is out of scope for TLS.
+    tls_target = effective_target if effective_target.host == target.host else target
     try:
-        tls_evidence, tls_findings = tls.scan(effective_target)
+        tls_evidence, tls_findings = tls.scan(tls_target)
         findings.extend(tls_findings)
         executions.append(
-            outcome("tls:inventory", effective_target.url, tls_findings)
+            outcome("tls:inventory", tls_target.url, tls_findings)
             if target.scheme == "https" and not tls_evidence.errors
             else CheckExecution(
                 "tls:inventory", target.url, "failed" if tls_evidence.errors else "unsupported"
@@ -301,7 +309,7 @@ def scan_target(
     for rule_id in sorted(vulnerability_rules):
         state = (
             "unsupported"
-            if effective_target.scheme != "https"
+            if tls_target.scheme != "https"
             else "skipped"
             if not config.tls_vulnerabilities
             else "failed"
@@ -313,7 +321,7 @@ def scan_target(
         executions.append(
             CheckExecution(
                 rule_id,
-                effective_target.url,
+                tls_target.url,
                 state,
                 tuple(
                     identifier
@@ -511,6 +519,7 @@ def _target_worker(
     # Own a process group so timeout cleanup also stops optional scanner subprocesses.
     if os.name == "posix":
         os.setsid()
+    result: TargetResult | None = None
     try:
         operation = options.pop("_operation", "security")
         if operation == "visual":
@@ -523,9 +532,13 @@ def _target_worker(
             ).targets[0]
         else:
             result = scan_target(target, config, **options)
-        connection.send(result)
     except Exception:  # noqa: BLE001 - return only sanitized parent-owned failures
-        connection.send(None)
+        result = None
+    try:
+        connection.send(result)
+    except OSError:
+        # The parent stopped waiting (deadline or cancellation) and already recorded it.
+        pass
     finally:
         connection.close()
 
@@ -594,6 +607,27 @@ def _bounded_scan_target(
             process.close()
 
 
+def external_redirect_targets(
+    targets: tuple[NormalizedTarget, ...], results: list[TargetResult | None]
+) -> tuple[NormalizedTarget, ...]:
+    """Root URLs of redirect destinations on hosts outside ``targets``, each listed once."""
+    seen = {origin(target.url) for target in targets}
+    extra: list[NormalizedTarget] = []
+    for result in results:
+        if result is None or result.exposure is None or not result.exposure.effective_url:
+            continue
+        effective = result.exposure.effective_url
+        try:
+            destination = origin(effective)
+        except TargetError:
+            continue
+        if destination in seen or urlsplit(destination).hostname == result.target.host:
+            continue
+        seen.add(destination)
+        extra.append(normalize_target(destination + "/"))
+    return tuple(extra)
+
+
 def scan_all(
     targets: tuple[NormalizedTarget, ...],
     config: ScannerConfig,
@@ -610,8 +644,13 @@ def scan_all(
     browser_options: BrowserDiscoveryOptions | None = None,
     api_operations: tuple[ApiOperation, ...] = (),
     advisory_snapshot: AdvisorySnapshot | None = None,
+    follow_external_redirects: bool = False,
 ) -> ScanRun:
-    """Scan a bounded target list concurrently without cancelling sibling targets."""
+    """Scan a bounded target list concurrently without cancelling sibling targets.
+
+    With ``follow_external_redirects``, every other host the targets finally redirected
+    to is scanned once afterwards, however many targets redirected to it.
+    """
     if traffic is None:
         with traffic_run(config) as shared:
             return scan_all(
@@ -629,13 +668,17 @@ def scan_all(
                 browser_options=browser_options,
                 api_operations=api_operations,
                 advisory_snapshot=advisory_snapshot,
+                follow_external_redirects=follow_external_redirects,
             )
     started = datetime.now(UTC)
-    completed = 0
+    pending: list[NormalizedTarget] = list(targets)
     results: list[TargetResult | None] = [None] * len(targets)
-    with ThreadPoolExecutor(max_workers=config.concurrency) as executor:
+
+    def run_batch(executor: ThreadPoolExecutor, batch: tuple[NormalizedTarget, ...]) -> bool:
+        """Scan one batch into ``results``; return False when the run was interrupted."""
+        offset = len(results) - len(batch)
         future_indexes = {}
-        for index, target in enumerate(targets):
+        for index, target in enumerate(batch, start=offset):
             if (
                 browser_options is not None
                 or bool(api_operations)
@@ -673,7 +716,7 @@ def scan_all(
                 except Exception:  # noqa: BLE001 - isolate unexpected failure to one target
                     now = datetime.now(UTC)
                     result = TargetResult(
-                        target=targets[index],
+                        target=pending[index],
                         status=TargetStatus.FAILED,
                         errors=("Unexpected target scan failure",),
                         complete=False,
@@ -681,9 +724,9 @@ def scan_all(
                         completed_at=now,
                     )
                 results[index] = result
-                completed += 1
+                completed = sum(item is not None for item in results)
                 if progress is not None:
-                    progress(completed, len(targets), result)
+                    progress(completed, len(pending), result)
         except KeyboardInterrupt:
             traffic.cancel()
             for future, index in future_indexes.items():
@@ -694,18 +737,28 @@ def scan_all(
                             results[index] = future.result()
                         except Exception:  # noqa: BLE001 - preserve sibling results during cancellation
                             results[index] = TargetResult(
-                                targets[index],
+                                pending[index],
                                 TargetStatus.FAILED,
                                 errors=("Unexpected target scan failure",),
                                 complete=False,
                             )
                     else:
                         results[index] = TargetResult(
-                            targets[index],
+                            pending[index],
                             TargetStatus.FAILED,
                             errors=("Run cancelled",),
                             complete=False,
                         )
+            return False
+        return True
+
+    with ThreadPoolExecutor(max_workers=config.concurrency) as executor:
+        if run_batch(executor, tuple(targets)) and follow_external_redirects:
+            extra = external_redirect_targets(targets, results)
+            if extra:
+                pending.extend(extra)
+                results.extend([None] * len(extra))
+                run_batch(executor, extra)
     return ScanRun(
         run_id=str(uuid4()),
         targets=tuple(result for result in results if result is not None),
