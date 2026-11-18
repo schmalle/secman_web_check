@@ -1,3 +1,4 @@
+import socket
 from types import SimpleNamespace
 
 import pytest
@@ -33,7 +34,53 @@ def test_default_tls_commands_exclude_vulnerability_probes(monkeypatch):
     assert captured[-1] == _INVENTORY_COMMANDS | _VULNERABILITY_COMMANDS
 
 
-def test_tls_hook_revalidates_every_connection_and_refuses_changed_dns(monkeypatch):
+def test_tls_hook_revalidates_every_connection_and_refuses_denied_dns(monkeypatch):
+    from sslyze.connection_helpers import tls_connection
+
+    from secman_web_check.targets import AddressDenied
+
+    target = normalize_target("https://example.com")
+    location = SimpleNamespace(hostname=target.host, ip_address="1.1.1.1", port=443)
+
+    def rebound(*_args):
+        raise AddressDenied("target example.com resolved to a denied address")
+
+    monkeypatch.setattr("secman_web_check.tls_transport.resolve_allowed", rebound)
+    monkeypatch.setattr(
+        "secman_web_check.tls_transport.socket.create_connection",
+        lambda *_args, **_kwargs: pytest.fail("a denied DNS answer must not connect"),
+    )
+    original = tls_connection._open_socket_for_direct_connection
+    with (
+        tls_connections(target, ScannerConfig(), TrafficController(ScannerConfig())),
+        pytest.raises(TlsConnectionDenied, match="denied address"),
+    ):
+        tls_connection._open_socket_for_direct_connection(location, 1)
+    # SSLyze threads only survive OSError; anything else hangs the scan until its deadline.
+    assert issubclass(TlsConnectionDenied, OSError)
+    assert tls_connection._open_socket_for_direct_connection is original
+
+
+def test_tls_hook_refuses_a_pinned_address_the_policy_denies(monkeypatch):
+    from sslyze.connection_helpers import tls_connection
+
+    target = normalize_target("https://example.com")
+    location = SimpleNamespace(hostname=target.host, ip_address="127.0.0.1", port=443)
+    monkeypatch.setattr(
+        "secman_web_check.tls_transport.resolve_allowed", lambda *_args: ("1.1.1.1",)
+    )
+    monkeypatch.setattr(
+        "secman_web_check.tls_transport.socket.create_connection",
+        lambda *_args, **_kwargs: pytest.fail("a denied pinned address must not connect"),
+    )
+    with (
+        tls_connections(target, ScannerConfig(), TrafficController(ScannerConfig())),
+        pytest.raises(TlsConnectionDenied, match="DNS snapshot"),
+    ):
+        tls_connection._open_socket_for_direct_connection(location, 1)
+
+
+def test_tls_hook_keeps_the_pinned_address_when_cdn_dns_rotates(monkeypatch):
     from sslyze.connection_helpers import tls_connection
 
     target = normalize_target("https://example.com")
@@ -41,19 +88,18 @@ def test_tls_hook_revalidates_every_connection_and_refuses_changed_dns(monkeypat
     monkeypatch.setattr(
         "secman_web_check.tls_transport.resolve_allowed", lambda *_args: ("2.2.2.2",)
     )
+    connected: list[tuple[str, int]] = []
+
+    def create_connection(address, **_kwargs):
+        connected.append(address)
+        return socket.socket()
+
     monkeypatch.setattr(
-        "secman_web_check.tls_transport.socket.create_connection",
-        lambda *_args, **_kwargs: pytest.fail("DNS drift must not connect"),
+        "secman_web_check.tls_transport.socket.create_connection", create_connection
     )
-    original = tls_connection._open_socket_for_direct_connection
-    with (
-        tls_connections(target, ScannerConfig(), TrafficController(ScannerConfig())),
-        pytest.raises(TlsConnectionDenied, match="DNS snapshot"),
-    ):
-        tls_connection._open_socket_for_direct_connection(location, 1)
-    # SSLyze threads only survive OSError; anything else hangs the scan until its deadline.
-    assert issubclass(TlsConnectionDenied, OSError)
-    assert tls_connection._open_socket_for_direct_connection is original
+    with tls_connections(target, ScannerConfig(), TrafficController(ScannerConfig())):
+        tls_connection._open_socket_for_direct_connection(location, 1).close()
+    assert connected == [("1.1.1.1", 443)]
 
 
 def test_real_sslyze_certificate_handshakes_share_and_release_socket_leases(monkeypatch, tmp_path):
@@ -125,6 +171,10 @@ def test_real_sslyze_certificate_handshakes_share_and_release_socket_leases(monk
             )
             monkeypatch.setattr(
                 "secman_web_check.tls_transport.resolve_allowed", lambda *_args: ("127.0.0.1",)
+            )
+            # The owned fixture listens on loopback, which the default policy denies.
+            monkeypatch.setattr(
+                "secman_web_check.tls_transport.AddressPolicy.allows", lambda *_args: True
             )
             monkeypatch.setattr(
                 "secman_web_check.tls._INVENTORY_COMMANDS", {ScanCommand.CERTIFICATE_INFO}

@@ -278,6 +278,8 @@ def _normalize_host(host: str) -> str:
         pass
     if any(character in host for character in "/\\@"):
         raise TargetError("target host is invalid")
+    if "*" in host:
+        raise TargetError("target host is a wildcard pattern, not a scannable host")
     try:
         normalized = host.encode("idna").decode("ascii").lower()
     except UnicodeError as error:

@@ -1,10 +1,14 @@
+import csv
 import json
 from dataclasses import replace
 from datetime import UTC, datetime
 
+import pytest
 from rich.console import Console
 
 from secman_web_check.models import (
+    BrowserHttpObservation,
+    BrowserNavigationDiagnostic,
     ComponentCategory,
     DetectedComponent,
     ExposureObservation,
@@ -16,7 +20,7 @@ from secman_web_check.models import (
     TargetResult,
     TargetStatus,
 )
-from secman_web_check.reports import render_terminal, write_html, write_json, write_sarif
+from secman_web_check.reports import render_terminal, write_csv, write_html, write_json, write_sarif
 from secman_web_check.targets import normalize_target
 
 
@@ -88,3 +92,71 @@ def test_terminal_report_renders_without_raw_response_body():
     assert "REACHABLE" in output
     assert "512 bytes" in output
     assert "https://example.com/app.js" in output
+
+
+@pytest.mark.parametrize(
+    ("http_status", "redirect_count", "flag", "label"),
+    [(200, 2, True, "Yes"), (302, 0, False, "No"), (None, 0, None, "Unknown")],
+)
+def test_reports_flag_followed_http_redirects(tmp_path, http_status, redirect_count, flag, label):
+    run = sample_run()
+    target = run.targets[0]
+    exposure = replace(target.exposure, http_status=http_status, redirect_count=redirect_count)
+    run = replace(
+        run, targets=(replace(target, exposure=exposure, browser_navigation_observed=flag),)
+    )
+
+    report = json.loads(write_json(run, tmp_path / "report.json").read_text())
+    sarif = json.loads(write_sarif(run, tmp_path / "report.sarif.json").read_text())
+    html = write_html(run, tmp_path / "report.html").read_text()
+    csv_report = write_csv(run, tmp_path / "report.csv").read_text()
+    console = Console(record=True)
+    render_terminal(run, console)
+
+    assert report["targets"][0]["exposure"]["redirectFollowed"] is flag
+    assert report["targets"][0]["browserNavigationObserved"] is flag
+    assert sarif["runs"][0]["properties"]["targets"][0]["exposure"]["redirectFollowed"] is flag
+    assert f"HTTP redirect followed: <strong>{label}</strong>" in html
+    browser_label = "Not checked" if flag is None else label
+    assert f"Browser navigation after load: <strong>{browser_label}</strong>" in html
+    assert next(csv.DictReader(csv_report.splitlines()))["redirect_followed"] == label
+    assert next(csv.DictReader(csv_report.splitlines()))["browser_navigation_observed"] == label
+    assert f"HTTP redirect followed: {label}" in console.export_text()
+
+
+def test_reports_record_blocked_browser_navigation(tmp_path):
+    run = sample_run()
+    diagnostic = BrowserNavigationDiagnostic("blocked-origin", "login.microsoftonline.com")
+    run = replace(
+        run,
+        targets=(
+            replace(
+                run.targets[0],
+                browser_navigation_diagnostic=diagnostic,
+                browser_navigation_hops=("auth.example", "login.microsoftonline.com"),
+                browser_http=BrowserHttpObservation(302, "auth.example"),
+            ),
+        ),
+    )
+    report = json.loads(write_json(run, tmp_path / "report.json").read_text())
+    sarif = json.loads(write_sarif(run, tmp_path / "report.sarif.json").read_text())
+    html = write_html(run, tmp_path / "report.html").read_text()
+    rows = csv.DictReader(write_csv(run, tmp_path / "report.csv").read_text().splitlines())
+
+    expected = {"reason": "blocked-origin", "hostname": "login.microsoftonline.com"}
+    assert report["targets"][0]["browserNavigationDiagnostic"] == expected
+    assert sarif["runs"][0]["properties"]["targets"][0]["browserNavigationDiagnostic"] == expected
+    assert "Attempted → login.microsoftonline.com · blocked by scanner policy" in html
+    assert "HTTP 302 → auth.example" in html
+    assert report["targets"][0]["browserHttp"] == {
+        "statusCode": 302,
+        "redirectHostname": "auth.example",
+    }
+    assert report["targets"][0]["browserNavigationHops"] == [
+        "auth.example",
+        "login.microsoftonline.com",
+    ]
+    row = next(rows)
+    assert row["browser_navigation_reason"] == expected["reason"]
+    assert row["browser_navigation_hostname"] == expected["hostname"]
+    assert row["browser_http"] == "HTTP 302 → auth.example"

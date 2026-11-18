@@ -16,7 +16,7 @@ def test_real_browser_discovers_rendered_link_and_observes_api_but_blocks_writes
         def with_allowed_origins(self, _origins):
             return self
 
-        def collect_one(self, target, method="GET"):
+        def collect_one(self, target, method="GET", *, user_agent):
             calls.append((method, target.url))
             body = b"<html><body>Rendered page</body></html>"
             mime = "text/html"

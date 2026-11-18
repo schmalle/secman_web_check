@@ -190,6 +190,12 @@ class ExposureObservation:
         if self.effective_url:
             object.__setattr__(self, "effective_url", public_url(self.effective_url))
 
+    @property
+    def redirect_followed(self) -> bool | None:
+        if self.http_status is None:
+            return None
+        return self.redirect_count > 0
+
 
 @dataclass(frozen=True, slots=True)
 class CheckExecution:
@@ -277,6 +283,18 @@ class JavaScriptAsset:
 
 
 @dataclass(frozen=True, slots=True)
+class BrowserNavigationDiagnostic:
+    reason: str
+    hostname: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class BrowserHttpObservation:
+    status_code: int | None = None
+    redirect_hostname: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class TargetResult:
     target: NormalizedTarget
     status: TargetStatus
@@ -293,6 +311,10 @@ class TargetResult:
     api_operations: tuple[ApiOperation, ...] = ()
     analysis_stages: tuple[AnalysisStage, ...] = ()
     evidence_records: tuple[EvidenceRecord, ...] = ()
+    browser_navigation_observed: bool | None = None
+    browser_navigation_diagnostic: BrowserNavigationDiagnostic | None = None
+    browser_http: BrowserHttpObservation | None = None
+    browser_navigation_hops: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "started_at", _utc(self.started_at))

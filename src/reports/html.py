@@ -6,7 +6,7 @@ from html import escape
 from pathlib import Path
 
 from ..models import ScanRun, public_url
-from .common import atomic_write
+from .common import atomic_write, browser_http_label, browser_navigation_label, redirect_label
 
 
 def write_html(run: ScanRun, path: Path) -> Path:
@@ -74,9 +74,22 @@ def write_html(run: ScanRun, path: Path) -> Path:
                 f"{escape(target.exposure.reachability.value)}; HTTP {http_status}; "
                 f"{target.exposure.redirect_count} redirects; body {body_length}"
             )
+        navigation = browser_navigation_label(
+            target.browser_navigation_observed, target.browser_navigation_diagnostic
+        )
+        browser_hops = (
+            f"<p>Browser redirect hops: {escape(' → '.join(target.browser_navigation_hops))}</p>"
+            if target.browser_navigation_hops
+            else ""
+        )
         sections.append(
             f"<section><h2>{escape(public_url(target.target.url))}</h2>"
             f"<p>Status: <strong>{escape(target.status.value)}</strong></p>"
+            f"<p>HTTP redirect followed: <strong>{redirect_label(target.exposure)}</strong></p>"
+            f"<p>Browser-style HTTP: <strong>{escape(browser_http_label(target.browser_http))}</strong></p>"
+            "<p>Browser navigation after load: "
+            f"<strong>{escape(navigation)}</strong></p>"
+            f"{browser_hops}"
             f"<p>Coverage: {target.coverage.pages_scanned} pages scanned; "
             f"{target.coverage.pages_discovered} discovered</p>"
             f"<details><summary>Scanned pages</summary><ul>{pages}</ul></details>"

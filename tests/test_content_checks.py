@@ -194,3 +194,13 @@ def test_linear_pem_detector_handles_large_unmatched_input_and_later_valid_block
         + "-----BEGIN RSA PRIVATE KEY-----\nmaterial\n-----END RSA PRIVATE KEY-----"
     )
     assert not _has_private_key("-----BEGIN RSA PRIVATE KEY-----\nx\n-----END EC PRIVATE KEY-----")
+
+
+def test_oversized_html_security_txt_fallback_is_reported_invalid():
+    # SPA catch-all routes answer /.well-known/security.txt with the app's HTML shell.
+    ctx = CheckContext(
+        response(),
+        security_txt=replace(response(b"<html>" * 20_000), truncated=True),
+        now=datetime(2026, 1, 1, tzinfo=UTC),
+    )
+    assert "WEB-CONTENT-SECURITY-TXT-INVALID" in {f.rule_id for f in check_content(ctx)}

@@ -67,6 +67,7 @@ def _exposure_document(exposure: ExposureObservation | None) -> dict[str, Any] |
         "reachability": exposure.reachability.value,
         "httpStatus": exposure.http_status,
         "redirectCount": exposure.redirect_count,
+        "redirectFollowed": exposure.redirect_followed,
         "bodyLength": exposure.body_length,
         "vantagePoint": exposure.vantage_point,
     }
@@ -107,6 +108,21 @@ def _target_document(target: TargetResult) -> dict[str, Any]:
             ],
         },
         "exposure": _exposure_document(target.exposure),
+        "browserNavigationObserved": target.browser_navigation_observed,
+        "browserNavigationHops": list(target.browser_navigation_hops),
+        "browserHttp": (
+            {
+                "statusCode": target.browser_http.status_code,
+                "redirectHostname": target.browser_http.redirect_hostname,
+            }
+            if target.browser_http is not None
+            else None
+        ),
+        "browserNavigationDiagnostic": (
+            asdict(target.browser_navigation_diagnostic)
+            if target.browser_navigation_diagnostic is not None
+            else None
+        ),
         "components": [_component_document(component) for component in target.components],
         "javascriptAssets": [_javascript_document(asset) for asset in target.javascript_assets],
         "errors": list(target.errors),

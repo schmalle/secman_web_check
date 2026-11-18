@@ -381,3 +381,52 @@ def test_worker_drops_a_result_the_parent_no_longer_waits_for(monkeypatch):
     pipe = ClosedPipe()
     _target_worker(pipe, normalize_target("https://www.a.example"), ScannerConfig(), {})
     assert pipe.closed
+
+
+@pytest.mark.parametrize(
+    ("content_type", "reported"),
+    [("text/html", False), ("text/plain; charset=utf-8", True)],
+)
+def test_only_an_oversized_plain_text_security_txt_is_a_target_error(content_type, reported):
+    class SecurityTxtCollector:
+        def with_max_body_bytes(self, _limit):
+            return self
+
+        def collect(self, target, method="GET", headers=None):
+            oversized = target.url.endswith("security.txt")
+            return (
+                HttpResponseEvidence(
+                    HttpRequest("GET", target.url),
+                    200,
+                    (("content-type", content_type if oversized else "text/html"),),
+                    b"<html></html>",
+                    oversized,
+                    0.01,
+                ),
+            )
+
+    result = scan_target(
+        normalize_target("https://example.com/"),
+        ScannerConfig(),
+        collector=SecurityTxtCollector(),
+        tls_scanner=FakeTlsScanner(),
+    )
+    assert ("security.txt exceeded the configured limit" in result.errors) is reported
+
+
+def test_an_unresolvable_hostname_is_reported_as_a_dns_failure():
+    import socket
+
+    from secman_web_check.http import HttpCollector
+
+    def nxdomain(*_args, **_kwargs):
+        raise socket.gaierror(socket.EAI_NONAME, "nodename nor servname provided")
+
+    result = scan_target(
+        normalize_target("https://stale.example"),
+        ScannerConfig(),
+        collector=HttpCollector(ScannerConfig(), resolver=nxdomain),
+        tls_scanner=FakeTlsScanner(),
+    )
+    assert result.status is TargetStatus.FAILED
+    assert result.errors == ("Target hostname did not resolve in DNS",)

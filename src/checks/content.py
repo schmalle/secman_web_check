@@ -8,6 +8,7 @@ from datetime import UTC, datetime
 from html.parser import HTMLParser
 from urllib.parse import urljoin, urlsplit
 
+from ..http import HttpResponseEvidence
 from ..models import Finding
 from .registry import RULES, CheckContext
 
@@ -137,6 +138,14 @@ def _has_internal_address(text: str) -> bool:
     return False
 
 
+def security_txt_is_plain_text(response: HttpResponseEvidence) -> bool:
+    """True when the first Content-Type header declares text/plain."""
+    content_types = [v for k, v in response.headers if k.lower() == "content-type"]
+    return bool(content_types) and content_types[0].split(";", 1)[0].strip().lower() == (
+        "text/plain"
+    )
+
+
 def _security_txt(context: CheckContext) -> tuple[Finding, ...]:
     response = context.security_txt
     if response is None:
@@ -144,6 +153,9 @@ def _security_txt(context: CheckContext) -> tuple[Finding, ...]:
     suffix = None
     if response.status_code in {404, 410}:
         suffix = "MISSING"
+    elif response.status_code == 200 and not security_txt_is_plain_text(response):
+        # SPA catch-all routes answer with a (possibly oversized) HTML page.
+        suffix = "INVALID"
     elif response.status_code == 200 and not response.truncated:
         fields: dict[str, list[str]] = {}
         for line in response.body.decode("utf-8", errors="replace").splitlines():
@@ -166,14 +178,7 @@ def _security_txt(context: CheckContext) -> tuple[Finding, ...]:
                 expiry = datetime.fromisoformat(expires[0])
             except ValueError:
                 pass  # Report invalid metadata without copying field values into evidence.
-        content_types = [v for k, v in response.headers if k.lower() == "content-type"]
-        if (
-            not contact_valid
-            or expiry is None
-            or expiry.tzinfo is None
-            or not content_types
-            or content_types[0].split(";", 1)[0].strip().lower() != "text/plain"
-        ):
+        if not contact_valid or expiry is None or expiry.tzinfo is None:
             suffix = "INVALID"
         elif expiry <= (
             context.now.replace(tzinfo=UTC) if context.now.tzinfo is None else context.now

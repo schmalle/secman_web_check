@@ -63,7 +63,7 @@ def test_browser_route_uses_pinned_collector_instead_of_browser_network() -> Non
     from secman_web_check.http import HttpRequest, HttpResponseEvidence
 
     class Collector:
-        def collect_one(self, target, method):
+        def collect_one(self, target, method, *, user_agent):
             assert target.url == "https://example.com/"
             assert method == "GET"
             return (

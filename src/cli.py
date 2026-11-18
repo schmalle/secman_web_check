@@ -439,6 +439,12 @@ def scan(
             "--browser-discovery", help="Discover rendered links and read-only browser API traffic."
         ),
     ] = False,
+    browser_redirects: Annotated[
+        bool,
+        typer.Option(
+            "--browser-redirects", help="Observe redirects from the target page in Chromium."
+        ),
+    ] = False,
     advisory_db: Annotated[
         Path | None, typer.Option("--advisory-db", help="Offline maintained OSV snapshot.")
     ] = None,
@@ -521,6 +527,7 @@ def scan(
         or ai_agent
         or javascript_inventory
         or browser_discovery
+        or browser_redirects
         or tls_vulnerabilities
         or advisory_db
     ) and scan_mode == "visual":
@@ -530,13 +537,15 @@ def scan(
     if (
         allowed_origins
         and not crawl
-        and not browser_discovery
+        and not (browser_discovery or browser_redirects)
         and not javascript_inventory
         and scan_mode == "security"
     ):
         raise typer.BadParameter(
-            "--allowed-origin requires crawl, script inventory, browser discovery or visual mode"
+            "--allowed-origin requires crawl, script inventory, browser checks or visual mode"
         )
+    if browser_discovery and browser_redirects:
+        raise typer.BadParameter("Use either --browser-discovery or --browser-redirects")
     if api_spec is not None and not crawl:
         raise typer.BadParameter("--api-spec requires --crawl")
     try:
@@ -611,8 +620,9 @@ def scan(
                 frozenset(allowed_origin(value) for value in allowed_origins or ()),
                 max_pages,
                 max_depth,
+                redirect_only=browser_redirects,
             )
-            if browser_discovery
+            if browser_discovery or browser_redirects
             else None
         )
         extended = bool(
@@ -624,7 +634,7 @@ def scan(
             or ai_agent
             or javascript_inventory
             or llm_review
-            or browser_discovery
+            or browser_options is not None
         )
         if push_to_secman:
             if scan_mode in {"security", "both"}:

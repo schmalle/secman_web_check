@@ -17,7 +17,7 @@ runId, profile, startedAt, completedAt
     │             httpRequests, crawlComplete,
     │             agentActions, agentComplete
     ├── exposure: configuredUrl, effectiveUrl, reachability, httpStatus,
-    │             redirectCount, bodyLength, vantagePoint
+    │             redirectCount, redirectFollowed, bodyLength, vantagePoint
     ├── components[]: componentKey, category, name, version, confidence,
     │                 evidenceType, evidence, sourceUrl
     ├── javascriptAssets[]: url, sha256, sizeBytes, statusCode, truncated
@@ -59,6 +59,33 @@ means the collected body was exactly `{"message":"Missing Authentication Token"}
 (ignoring surrounding whitespace), the AWS API Gateway response for an endpoint that
 requires authentication. `bodyLength` is the number of response body bytes received
 under the configured body limit; it is `null` when collection failed.
+Exposure `redirectFollowed` is `true` when the collector followed at least one HTTP
+redirect for the target URL, `false` when it collected a response without following
+one, and `null` when no HTTP response was available. HTML and terminal reports show
+Yes, No, or Unknown. The findings CSV repeats the flag in `redirect_followed`.
+Target `browserNavigationObserved` reports whether the final browser URL differed from
+the initial document response URL during the observation window in browser discovery
+or visual mode. A skipped or failed observation is Unknown (`null`), including when
+page scripts fail and no navigation is observed. The findings CSV uses
+`browser_navigation_observed`.
+The optional `browserNavigationDiagnostic` gives the reason for incomplete observation.
+`script-failure` identifies a page script that failed to load or run.
+`blocked-origin` records a main-frame navigation attempt outside the browser origin
+allowlist. It includes only the destination hostname. The CSV columns are
+`browser_navigation_reason` and `browser_navigation_hostname`.
+`blocked-http-redirect` identifies a server redirect returned to the isolated browser's
+request and stopped before connecting to its destination. Browser requests use a
+Chromium User-Agent without the headless marker to observe ordinary browser responses.
+For an eligible no-redirect response, the default security scan makes one additional
+pinned GET using a Chromium User-Agent. `browserHttp` records the status and any
+redirect destination hostname from that request. The scanner does not follow that
+destination as part of this probe. A null observation means it was not checked, and
+a null status means the check was inconclusive.
+With `--browser-redirects`, Playwright observes the starting page for up to five seconds
+after document load within the browser deadline. `browserNavigationHops` lists the
+observed destination hostnames, including a destination blocked by policy. An explicit
+`--allowed-origin` can permit the next document hop. Each server redirect is passed back
+to the pinned collector before following it, including same-origin hops.
 
 
 ## Evidence and provenance (schema 1.3)

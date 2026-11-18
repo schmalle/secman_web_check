@@ -22,6 +22,8 @@ from secman_web_check.targets import (
         "http://user:pass@example.com",
         "file:///etc/passwd",
         "https://example.com/#secret",
+        "*.example.com",
+        "https://*.apps.example.com/",
     ],
 )
 def test_rejects_unsafe_target_forms(value: str) -> None:

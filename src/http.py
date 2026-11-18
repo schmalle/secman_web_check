@@ -36,10 +36,27 @@ def target_origin(target: NormalizedTarget) -> str:
 _REDIRECTS = {301, 302, 303, 307, 308}
 _SAFE_HEADERS = {"accept", "accept-language", "origin", "cache-control", "pragma"}
 _METHODS = {"GET", "HEAD", "OPTIONS", "TRACE"}
+BROWSER_PROBE_USER_AGENT = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36"
+)
 
 
 class CollectionError(RuntimeError):
     """A safe-to-report collection failure, without upstream exception details."""
+
+
+class UnresolvedHostError(CollectionError):
+    """The target hostname has no DNS answer (e.g. NXDOMAIN for a stale record)."""
+
+
+class BrowserRedirectDenied(CollectionError):
+    """A browser HTTP redirect whose destination origin is outside scope."""
+
+    def __init__(self, hostname: str, status_code: int = 302) -> None:
+        super().__init__("Browser HTTP redirect blocked by origin policy")
+        self.hostname = hostname
+        self.status_code = status_code
 
 
 class RequestBudget:
@@ -379,7 +396,11 @@ class HttpCollector:
             raise AddressDenied("Target origin denied by policy")
 
     def collect_one(
-        self, target: NormalizedTarget, method: str = "GET"
+        self,
+        target: NormalizedTarget,
+        method: str = "GET",
+        *,
+        user_agent: str = "secman-web-check/0.1",
     ) -> tuple[HttpResponseEvidence, str | None]:
         """Fetch one pinned hop for browser interception; validate a redirect before release."""
         if method not in {"GET", "HEAD"}:
@@ -397,7 +418,7 @@ class HttpCollector:
                 current,
                 addresses,
                 method,
-                {"Accept-Encoding": "identity", "User-Agent": "secman-web-check/0.1"},
+                {"Accept-Encoding": "identity", "User-Agent": user_agent},
                 deadline,
             )
             if evidence.truncated:
@@ -407,7 +428,10 @@ class HttpCollector:
             if not location:
                 raise CollectionError("Browser redirect is missing or ambiguous")
             destination = _redirect_target(current.url, location)
-            self._check_origin(destination)
+            try:
+                self._check_origin(destination)
+            except AddressDenied:
+                raise BrowserRedirectDenied(destination.host, evidence.status_code) from None
             if current.scheme == "https" and destination.scheme == "http":
                 raise CollectionError("Browser redirect downgraded to HTTP")
             resolve_allowed(destination, self._policy, self._resolver)
@@ -480,6 +504,8 @@ class HttpCollector:
                     method = "GET"
         except AddressDenied:
             raise AddressDenied("Target address denied by policy") from None
+        except socket.gaierror:
+            raise UnresolvedHostError("Target hostname did not resolve in DNS") from None
         except (httpx.HTTPError, OSError, ValueError):
             raise CollectionError("HTTP collection failed") from None
 

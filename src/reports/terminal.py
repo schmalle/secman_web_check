@@ -6,6 +6,7 @@ from rich.console import Console
 from rich.table import Table
 
 from ..models import ScanRun, public_url
+from .common import browser_http_label, browser_navigation_label, redirect_label
 
 
 def render_terminal(run: ScanRun, console: Console | None = None) -> None:
@@ -21,6 +22,16 @@ def render_terminal(run: ScanRun, console: Console | None = None) -> None:
             output.print(
                 f"Coverage: {target.coverage.pages_scanned} pages scanned, "
                 f"{target.coverage.pages_discovered} discovered"
+            )
+        output.print(f"HTTP redirect followed: {redirect_label(target.exposure)}")
+        output.print(f"Browser-style HTTP: {browser_http_label(target.browser_http)}", markup=False)
+        navigation = browser_navigation_label(
+            target.browser_navigation_observed, target.browser_navigation_diagnostic
+        )
+        output.print(f"Browser navigation after load: {navigation}", markup=False)
+        if target.browser_navigation_hops:
+            output.print(
+                "Browser redirect hops: " + " → ".join(target.browser_navigation_hops), markup=False
             )
         if target.exposure is not None:
             status = (

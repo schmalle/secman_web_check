@@ -11,13 +11,18 @@ from httpcore._backends.base import NetworkBackend, NetworkStream
 
 from secman_web_check.config import ScannerConfig
 from secman_web_check.http import (
+    BROWSER_PROBE_USER_AGENT,
+    BrowserRedirectDenied,
     CollectionError,
     HttpCollector,
     PinnedNetworkBackend,
     RequestBudget,
     pinned_transport,
 )
+from secman_web_check.models import BrowserHttpObservation
+from secman_web_check.orchestrator import scan_target
 from secman_web_check.targets import AddressDenied, normalize_target
+from secman_web_check.tls import TlsEvidence
 
 
 def response(status=200, headers=(), body=b"ok"):
@@ -122,13 +127,16 @@ def test_same_host_redirect_resolves_again_and_blocks_rebinding():
 
 
 def test_browser_single_hop_never_releases_unapproved_redirect():
-    backend = FakeBackend(response(302, [("Location", "https://other.example/private")]))
+    backend = FakeBackend(response(302, [("Location", "https://other.example/private?state=test")]))
     collector, calls = make_collector(backend)
     scoped = collector.with_allowed_origins(frozenset({"https://example.com"}))
 
-    with pytest.raises(CollectionError):
-        scoped.collect_one(normalize_target("https://example.com"))
+    with pytest.raises(BrowserRedirectDenied) as denied:
+        scoped.collect_one(normalize_target("https://example.com"), user_agent="BrowserFixture/1")
 
+    assert denied.value.hostname == "other.example"
+    assert "state=" not in str(denied.value)
+    assert b"User-Agent: BrowserFixture/1" in backend.streams[0].written
     assert len(backend.dials) == 1
     assert calls == ["example.com"]
 
@@ -142,6 +150,31 @@ def test_browser_single_hop_keeps_dial_pinned():
     assert redirect is None
     assert evidence.body == b"<h1>ok</h1>"
     assert [dial[0] for dial in backend.dials] == ["93.184.216.34"]
+
+
+def test_default_scan_records_one_browser_style_request_without_following_auth_redirect():
+    class Tls:
+        def scan(self, target):
+            return TlsEvidence(True), ()
+
+    backend = FakeBackend(
+        response(403, [("Content-Type", "text/html")]),
+        response(404),
+        response(303, [("Location", "https://login.example/authorize?state=fixture")]),
+    )
+    collector, resolved = make_collector(backend)
+    result = scan_target(
+        normalize_target("https://example.com"),
+        ScannerConfig(),
+        collector=collector,
+        tls_scanner=Tls(),
+    )
+
+    assert result.exposure.http_status == 403
+    assert result.browser_http == BrowserHttpObservation(303, "login.example")
+    assert resolved == ["example.com", "example.com", "example.com"]
+    assert BROWSER_PROBE_USER_AGENT.encode() in backend.streams[2].written
+    assert "state=fixture" not in repr(result.browser_http)
 
 
 def test_request_budget_counts_redirect_hops_before_dial():

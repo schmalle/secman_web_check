@@ -19,6 +19,7 @@ from .agent import _SYSTEM, AgentOptions, run_agent
 from .browser_discovery import BrowserDiscoveryOptions, discover_browser
 from .checks import CheckContext, evaluate_passive
 from .checks.active import ACTIVE_PROBES, run_active_checks
+from .checks.content import security_txt_is_plain_text
 from .checks.redirects import check_redirects
 from .components import (
     detect_components,
@@ -32,12 +33,21 @@ from .crawler import CrawlOptions, crawl, origin
 from .discovery import discover_paths
 from .external_profile import ExternalProfile
 from .external_scanners import scan_with_external
-from .http import CollectionError, HttpCollector, RequestBudget
+from .http import (
+    BROWSER_PROBE_USER_AGENT,
+    BrowserRedirectDenied,
+    CollectionError,
+    HttpCollector,
+    RequestBudget,
+    UnresolvedHostError,
+)
 from .intelligence import AdvisorySnapshot
 from .javascript import inventory_javascript
 from .models import (
     AnalysisStage,
     ApiOperation,
+    BrowserHttpObservation,
+    BrowserNavigationDiagnostic,
     CheckExecution,
     CoverageSummary,
     ExposureObservation,
@@ -124,7 +134,7 @@ def scan_target(
         responses = http.collect(target)
         response = responses[-1]
         effective_target = normalize_target(response.url)
-    except (AddressDenied, CollectionError):
+    except (AddressDenied, CollectionError) as error:
         return TargetResult(
             target=target,
             status=TargetStatus.FAILED,
@@ -135,7 +145,11 @@ def scan_target(
                 http_status=None,
                 redirect_count=0,
             ),
-            errors=("HTTP collection failed or target address was denied",),
+            errors=(
+                str(error)
+                if isinstance(error, UnresolvedHostError)
+                else "HTTP collection failed or target address was denied",
+            ),
             complete=False,
             started_at=started,
             completed_at=datetime.now(UTC),
@@ -148,12 +162,33 @@ def scan_target(
         security_txt = http.with_max_body_bytes(min(config.max_body_bytes, 65_536)).collect(
             _security_txt_target(effective_target)
         )[-1]
-        if security_txt.truncated:
+        if security_txt.truncated and security_txt_is_plain_text(security_txt):
             errors.append("security.txt exceeded the configured limit")
     except (AddressDenied, CollectionError):
         errors.append("security.txt collection failed")
 
     context = CheckContext(response=response, security_txt=security_txt)
+    browser_http = None
+    if (
+        isinstance(http, HttpCollector)
+        and len(responses) == 1
+        and response.redirect_url is None
+        and response.blocked_redirect_reason is None
+        and (context.is_html or response.status_code in {401, 403})
+    ):
+        try:
+            scoped = http.with_allowed_origins(frozenset({origin(target.url)}))
+            browser_response, destination = scoped.collect_one(
+                target, user_agent=BROWSER_PROBE_USER_AGENT
+            )
+            browser_http = BrowserHttpObservation(
+                browser_response.status_code,
+                urlsplit(destination).hostname if destination else None,
+            )
+        except BrowserRedirectDenied as error:
+            browser_http = BrowserHttpObservation(error.status_code, error.hostname)
+        except CollectionError:
+            browser_http = BrowserHttpObservation()
     findings = list(check_redirects(responses))
     checked, initial_executions = evaluate_passive(context)
     findings.extend(checked)
@@ -379,9 +414,15 @@ def scan_target(
                 if advisory_snapshot
                 else find_component_vulnerabilities(page_components, page.url)
             )
+    browser_navigation_observed = None
+    browser_navigation_diagnostic = None
+    browser_navigation_hops: tuple[str, ...] = ()
     if browser_options is not None and optional_scope_allowed:
         try:
             rendered = discover_browser(effective_target, config, browser_options, traffic)
+            browser_navigation_observed = rendered.browser_navigation_observed
+            browser_navigation_diagnostic = rendered.browser_navigation_diagnostic
+            browser_navigation_hops = rendered.browser_navigation_hops
             errors.extend(rendered.errors)
             api_operations = tuple(dict.fromkeys((*api_operations, *rendered.operations)))
             for page in rendered.pages:
@@ -414,6 +455,7 @@ def scan_target(
                 )
             )
         except (OSError, RuntimeError, TimeoutError, ValueError):
+            browser_navigation_diagnostic = BrowserNavigationDiagnostic("browser-failure")
             errors.append("Browser discovery failed or exhausted its budget")
             executions.append(CheckExecution("browser:discovery", target.url, "exhausted"))
     else:
@@ -506,6 +548,10 @@ def scan_target(
             body_length=len(response.body),
         ),
         inventory_complete=inventory_response_is_complete(response) and coverage.crawl_complete,
+        browser_navigation_observed=browser_navigation_observed,
+        browser_navigation_diagnostic=browser_navigation_diagnostic,
+        browser_navigation_hops=browser_navigation_hops,
+        browser_http=browser_http,
         errors=tuple(dict.fromkeys(errors)),
         complete=complete,
         started_at=started,
@@ -752,7 +798,12 @@ def scan_all(
             return False
         return True
 
-    with ThreadPoolExecutor(max_workers=config.concurrency) as executor:
+    workers = (
+        min(config.concurrency, 4)
+        if browser_options is not None and browser_options.redirect_only
+        else config.concurrency
+    )
+    with ThreadPoolExecutor(max_workers=workers) as executor:
         if run_batch(executor, tuple(targets)) and follow_external_redirects:
             extra = external_redirect_targets(targets, results)
             if extra:
@@ -775,6 +826,7 @@ def scan_all(
                 "maxPages": browser_options.max_pages,
                 "maxDepth": browser_options.max_depth,
                 "origins": sorted(browser_options.allowed_origins),
+                "redirectOnly": browser_options.redirect_only,
             },
             api=[
                 {
@@ -818,7 +870,12 @@ def scan_all(
                     (config.active, "active"),
                     (config.tls_vulnerabilities, "tls-vulnerabilities"),
                     (javascript, "javascript"),
-                    (browser_options is not None, "browser"),
+                    (
+                        browser_options is not None,
+                        "browser-redirects"
+                        if browser_options is not None and browser_options.redirect_only
+                        else "browser",
+                    ),
                     (crawl_options is not None, "crawl"),
                     (dirbuster, "dirbuster"),
                     (bool(external_scanners), "external"),

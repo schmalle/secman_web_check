@@ -25,10 +25,17 @@ from .api_inventory import observed_operation
 from .config import ScannerConfig
 from .coverage import manifest
 from .crawler import origin
-from .http import CollectionError, HttpCollector, HttpResponseEvidence, RequestBudget
+from .http import (
+    BrowserRedirectDenied,
+    CollectionError,
+    HttpCollector,
+    HttpResponseEvidence,
+    RequestBudget,
+)
 from .models import (
     AnalysisStage,
     ApiOperation,
+    BrowserNavigationDiagnostic,
     CoverageSummary,
     EvidenceRecord,
     Finding,
@@ -77,6 +84,7 @@ class VisualOptions:
     traffic: TrafficController | None = None
     capture_screenshots: bool = True
     start_index: int = 1
+    redirect_only: bool = False
 
     def __post_init__(self) -> None:
         if self.analyze and not self.api_key:
@@ -103,6 +111,9 @@ class PageCapture:
     discovered_urls: tuple[str, ...] = ()
     api_operations: tuple[ApiOperation, ...] = ()
     responses: tuple[HttpResponseEvidence, ...] = ()
+    browser_navigation_observed: bool | None = None
+    browser_navigation_diagnostic: BrowserNavigationDiagnostic | None = None
+    browser_navigation_hops: tuple[str, ...] = ()
 
 
 def _safe_name(target: NormalizedTarget, index: int) -> str:
@@ -129,6 +140,9 @@ def _route_handler(
     collector: HttpCollector | None = None,
     allowed_origins: frozenset[str] | None = None,
     observe: Callable[[Any, HttpResponseEvidence | None], None] | None = None,
+    observe_blocked_origin: Callable[[Any, BrowserNavigationDiagnostic], None] | None = None,
+    user_agent: str = "secman-web-check/0.1",
+    intercept_redirect: Callable[[Any, str], None] | None = None,
 ) -> Callable[[Any], Awaitable[None]]:
     pinned = collector or HttpCollector(ScannerConfig(allow_private_targets=policy.allow_private))
 
@@ -148,16 +162,31 @@ def _route_handler(
         try:
             target = normalize_target(request.url)
             if allowed_origins is not None and origin(target.url) not in allowed_origins:
+                if observe_blocked_origin is not None:
+                    observe_blocked_origin(
+                        request, BrowserNavigationDiagnostic("blocked-origin", target.host)
+                    )
                 await route.abort()
                 return
             evidence, redirect = await asyncio.to_thread(
-                pinned.collect_one, target, getattr(request, "method", "GET")
+                pinned.collect_one, target, getattr(request, "method", "GET"), user_agent=user_agent
             )
+        except BrowserRedirectDenied as error:
+            if observe_blocked_origin is not None:
+                observe_blocked_origin(
+                    request, BrowserNavigationDiagnostic("blocked-http-redirect", error.hostname)
+                )
+            await route.abort()
+            return
         except (CollectionError, AddressDenied, ValueError):
             await route.abort()
             return
         if observe:
             observe(request, evidence)
+        if redirect is not None and intercept_redirect is not None:
+            intercept_redirect(request, redirect)
+            await route.abort("aborted")
+            return
         headers = {
             name: value
             for name, value in evidence.headers
@@ -217,6 +246,8 @@ class BrowserCapturer:
                 pass
 
     async def capture(self, target: NormalizedTarget, index: int) -> PageCapture:
+        from playwright.async_api import Error as PlaywrightError
+
         if self._browser is None:
             raise RuntimeError("browser capturer is not open")
         context = None
@@ -224,10 +255,68 @@ class BrowserCapturer:
         budget = RequestBudget(200, self.config.requests_per_second)
         observed: list[ApiOperation] = []
         responses: list[HttpResponseEvidence] = []
+        links: list[object] = []
+        script_failed = False
+        blocked_navigation: BrowserNavigationDiagnostic | None = None
+        pending_redirect: str | None = None
+        committed_urls: list[str] = []
+        hops: list[str] = []
+
+        def is_main_navigation(request: Any) -> bool:
+            if not request.is_navigation_request() or page is None:
+                return False
+            try:
+                return bool(request.frame == page.main_frame)
+            except PlaywrightError:
+                # Requests without an owning frame cannot establish main-frame navigation.
+                return False
+
+        def record_hop(hostname: str) -> None:
+            if len(hops) < self.config.max_redirects + 1 and (not hops or hops[-1] != hostname):
+                hops.append(hostname)
+
+        def observe_blocked_origin(request: Any, diagnostic: BrowserNavigationDiagnostic) -> None:
+            nonlocal blocked_navigation
+            if blocked_navigation is None and is_main_navigation(request):
+                blocked_navigation = diagnostic
+                if diagnostic.hostname is not None:
+                    record_hop(diagnostic.hostname)
+
+        def intercept_http_redirect(request: Any, destination: str) -> None:
+            nonlocal pending_redirect
+            if is_main_navigation(request):
+                pending_redirect = destination
+                hostname = urlsplit(destination).hostname
+                if hostname is not None:
+                    record_hop(hostname)
+
+        def observe_commit(frame: Any) -> None:
+            if page is None or frame != page.main_frame:
+                return
+            parts = urlsplit(frame.url)
+            if parts.scheme not in {"http", "https"} or parts.hostname is None:
+                return
+            if len(committed_urls) < 2 and (not committed_urls or frame.url != committed_urls[-1]):
+                committed_urls.append(frame.url)
+            if frame.url != target.url:
+                record_hop(parts.hostname)
+
+        def navigation_diagnostic() -> BrowserNavigationDiagnostic | None:
+            if blocked_navigation is not None:
+                return blocked_navigation
+            if script_failed:
+                return BrowserNavigationDiagnostic("script-failure")
+            return None
 
         def observe(request: Any, evidence: HttpResponseEvidence | None) -> None:
+            nonlocal script_failed
             if evidence is not None:
                 responses.append(evidence)
+                if request.resource_type == "script":
+                    mime = dict(evidence.headers).get("content-type", "").lower()
+                    script_failed |= (
+                        evidence.truncated or evidence.status_code >= 400 or "text/html" in mime
+                    )
             if request.resource_type in {"xhr", "fetch"}:
                 mime = (
                     next(
@@ -242,6 +331,10 @@ class BrowserCapturer:
                     else ""
                 )
                 observed.append(observed_operation(request.url, request.method, mime))
+
+        def note_script_failure(*_args: object) -> None:
+            nonlocal script_failed
+            script_failed = True
 
         try:
             origins = self.options.allowed_origins | {origin(target.url)}
@@ -261,6 +354,10 @@ class BrowserCapturer:
                 "Object.defineProperty(window, 'Worker', {value: undefined});"
                 "Object.defineProperty(window, 'SharedWorker', {value: undefined});"
             )
+            page = await context.new_page()
+            user_agent = (await page.evaluate("navigator.userAgent")).replace(
+                "HeadlessChrome/", "Chrome/", 1
+            )
             await context.route(
                 "**/*",
                 _route_handler(
@@ -273,9 +370,93 @@ class BrowserCapturer:
                     ).with_allowed_origins(origins),
                     origins,
                     observe,
+                    observe_blocked_origin,
+                    user_agent,
+                    intercept_http_redirect if self.options.redirect_only else None,
                 ),
             )
-            page = await context.new_page()
+            page.on("pageerror", note_script_failure)
+
+            def note_request_failure(request: Any) -> None:
+                if request.resource_type == "script":
+                    note_script_failure()
+
+            page.on("requestfailed", note_request_failure)
+            page.on("framenavigated", observe_commit)
+            if self.options.redirect_only:
+                next_url = target.url
+                deadline = monotonic() + self.options.timeout_seconds
+                status_code = None
+                for hop_index in range(self.config.max_redirects + 1):
+                    pending_redirect = None
+                    remaining_ms = max(1, int(1000 * (deadline - monotonic())))
+                    try:
+                        response = await page.goto(
+                            next_url, wait_until="domcontentloaded", timeout=remaining_ms
+                        )
+                    except PlaywrightError:
+                        if (
+                            pending_redirect is None
+                            and blocked_navigation is None
+                            and not committed_urls
+                        ):
+                            raise
+                    else:
+                        status_code = None if response is None else response.status
+                    if pending_redirect is None and blocked_navigation is None:
+                        await page.wait_for_timeout(
+                            min(
+                                self.options.settle_seconds * 1000,
+                                max(0, (deadline - monotonic()) * 1000),
+                            )
+                        )
+                    if pending_redirect is None or blocked_navigation is not None:
+                        break
+                    next_url = pending_redirect
+                    if monotonic() >= deadline or hop_index == self.config.max_redirects:
+                        return PageCapture(
+                            target.url,
+                            target.url,
+                            None,
+                            "",
+                            "",
+                            None,
+                            "Browser redirect limit or deadline reached",
+                            request_count=budget.count,
+                            browser_navigation_diagnostic=BrowserNavigationDiagnostic(
+                                "browser-limit"
+                            ),
+                            browser_navigation_hops=tuple(hops),
+                        )
+                diagnostic = navigation_diagnostic()
+                navigated = len(committed_urls) > 1 or bool(hops)
+                return PageCapture(
+                    target.url,
+                    page.url,
+                    None,
+                    "",
+                    "",
+                    status_code,
+                    request_count=budget.count,
+                    browser_navigation_observed=(
+                        None
+                        if blocked_navigation is not None
+                        else True
+                        if navigated
+                        else False
+                        if diagnostic is None and status_code == 200
+                        else None
+                    ),
+                    browser_navigation_diagnostic=(
+                        diagnostic
+                        or (
+                            BrowserNavigationDiagnostic("browser-failure")
+                            if status_code != 200 and not navigated
+                            else None
+                        )
+                    ),
+                    browser_navigation_hops=tuple(hops),
+                )
             response = await page.goto(
                 target.url,
                 wait_until="load",
@@ -283,6 +464,21 @@ class BrowserCapturer:
             )
             if self.options.settle_seconds:
                 await page.wait_for_timeout(int(self.options.settle_seconds * 1000))
+            if blocked_navigation is not None:
+                return PageCapture(
+                    target.url,
+                    target.url,
+                    None,
+                    "",
+                    "",
+                    None,
+                    "redirect denied",
+                    request_count=budget.count,
+                    api_operations=tuple(observed),
+                    responses=tuple(responses),
+                    browser_navigation_diagnostic=navigation_diagnostic(),
+                    browser_navigation_hops=tuple(hops),
+                )
             final_url = page.url
             if origin(final_url) not in origins or not await _allowed(final_url, self.policy):
                 return PageCapture(target.url, final_url, None, "", "", None, "redirect denied")
@@ -298,6 +494,12 @@ class BrowserCapturer:
             status_code = None if response is None else response.status
             if status_code != 200:
                 return PageCapture(target.url, final_url, None, "", "", status_code)
+            navigation = None
+            if response is not None:
+                if final_url != response.url:
+                    navigation = True
+                elif navigation_diagnostic() is None:
+                    navigation = False
             title = (await page.title())[:300]
             text = re.sub(r"\s+", " ", await page.locator("body").inner_text())[:4000]
             links = await page.locator("a[href]").evaluate_all(
@@ -333,6 +535,9 @@ class BrowserCapturer:
                 discovered_urls=tuple(link for link in links if isinstance(link, str)),
                 api_operations=tuple(observed),
                 responses=tuple(responses),
+                browser_navigation_observed=navigation,
+                browser_navigation_diagnostic=navigation_diagnostic(),
+                browser_navigation_hops=tuple(hops),
             )
         except Exception as error:  # noqa: BLE001 - isolate one browser target
             return PageCapture(
@@ -347,6 +552,10 @@ class BrowserCapturer:
                 discovered_urls=tuple(link for link in links if isinstance(link, str)),
                 api_operations=tuple(observed),
                 responses=tuple(responses),
+                browser_navigation_diagnostic=(
+                    navigation_diagnostic() or BrowserNavigationDiagnostic("browser-failure")
+                ),
+                browser_navigation_hops=tuple(hops),
             )
         finally:
             if context is not None:
@@ -565,6 +774,9 @@ async def _scan_visual_async(
                 ),
                 errors=tuple(errors),
                 complete=complete,
+                browser_navigation_observed=capture.browser_navigation_observed,
+                browser_navigation_diagnostic=capture.browser_navigation_diagnostic,
+                browser_navigation_hops=capture.browser_navigation_hops,
                 started_at=target_started,
                 completed_at=datetime.now(UTC),
             )
@@ -698,7 +910,20 @@ def merge_runs(security: ScanRun, visual: ScanRun) -> ScanRun:
                 analysis_stages=(*left.analysis_stages, *right.analysis_stages),
                 evidence_records=(*left.evidence_records, *right.evidence_records),
                 exposure=left.exposure,
+                browser_http=left.browser_http,
+                browser_navigation_observed=(
+                    right.browser_navigation_observed
+                    if right.browser_navigation_observed is True
+                    or left.browser_navigation_observed is None
+                    else left.browser_navigation_observed
+                ),
                 inventory_complete=left.inventory_complete,
+                browser_navigation_diagnostic=(
+                    right.browser_navigation_diagnostic or left.browser_navigation_diagnostic
+                ),
+                browser_navigation_hops=tuple(
+                    dict.fromkeys((*left.browser_navigation_hops, *right.browser_navigation_hops))
+                ),
                 coverage=left.coverage,
                 errors=tuple(dict.fromkeys((*left.errors, *right.errors))),
                 complete=complete,

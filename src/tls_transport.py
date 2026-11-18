@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ipaddress
 import socket
 import threading
 from collections.abc import Iterator
@@ -53,12 +54,17 @@ def tls_connections(
 
     def connect(server_location: Any, network_timeout: int) -> socket.socket:
         location = server_location
+        policy = AddressPolicy.from_config(config)
         try:
-            addresses = resolve_allowed(target, AddressPolicy.from_config(config))
-        except AddressDenied:
+            # Revalidate the live DNS answers; any denied answer (rebinding) refuses.
+            resolve_allowed(target, policy)
+            pinned_allowed = policy.allows(ipaddress.ip_address(location.ip_address))
+        except (AddressDenied, ValueError):
             raise TlsConnectionDenied("TLS target resolved to a denied address") from None
+        # CDNs rotate answers between handshakes, so the pinned IP need not be in the
+        # latest answer set; it must still pass policy itself.
         if (
-            location.ip_address not in addresses
+            not pinned_allowed
             or location.port != (target.port or 443)
             or location.hostname != target.host
         ):

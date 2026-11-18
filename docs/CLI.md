@@ -35,7 +35,9 @@ Exactly one target source is required:
 Duplicates are normalized. Conflicting CSV account bindings fail. Invalid list lines
 are skipped with stderr warnings; `--strict` aborts on the first invalid line. Invalid
 headers, unreadable files and all-invalid lists abort. URL credentials/fragments,
-unsupported schemes and denied addresses are rejected. Quote URLs with shell metacharacters.
+unsupported schemes, wildcard host patterns (`*.example.com`) and denied addresses are
+rejected. A target whose hostname has no DNS answer fails with
+`Target hostname did not resolve in DNS`. Quote URLs with shell metacharacters.
 
 | Option | Default | Meaning |
 | --- | --- | --- |
@@ -88,6 +90,7 @@ It is not passive network observation. TLS vulnerability probes need a separate 
 | `--javascript-inventory` | off | Fetch referenced script assets; retain sanitized URL, checksum, bytes/status/truncation |
 | `--crawl` | off | Bounded public GET discovery from HTML, form actions, robots and sitemaps |
 | `--browser-discovery` | off | Execute page JS in isolated Chromium; follow rendered anchors and inventory observed fetch/XHR |
+| `--browser-redirects` | off | Observe one starting page in isolated Chromium without crawling or screenshots; at most four target workers |
 | `--allowed-origin URL` | none | Repeatable extra crawl/browser/script origin; no path or query |
 | `--max-pages INTEGER` | `50` | At least 1; maximum HTML/browser discovery pages |
 | `--max-depth INTEGER` | `2` | At least 0; link depth |
@@ -135,8 +138,9 @@ provider calls and external proxy connections. Defaults can be overridden in TOM
 | `--max-provider-calls INTEGER` | `50` | Shared call ceiling across all AI features |
 
 HTTP redirects consume individual admissions. SSLyze obtains admission for each TCP
-connection, which also revalidates DNS; its TLS messages within one connection are not
-separate HTTP requests. Provider calls consume one admission/call. External HTTPS uses
+connection, which also revalidates DNS: any denied answer refuses the connection, and the
+pinned address must itself pass the address policy. CDN answer rotation between handshakes
+is tolerated. Its TLS messages within one connection are not separate HTTP requests. Provider calls consume one admission/call. External HTTPS uses
 bounded CONNECT tunnels plus the pinned tool's native pacing; encrypted requests within
 one tunnel cannot be counted individually by the proxy. Budgets are admission/connection
 bounds, not a claim to count every protocol message. Native output/tunnel byte and time

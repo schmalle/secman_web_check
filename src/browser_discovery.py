@@ -11,7 +11,7 @@ from time import monotonic
 from .config import ScannerConfig
 from .crawler import canonical_page, origin
 from .http import HttpResponseEvidence
-from .models import ApiOperation
+from .models import ApiOperation, BrowserNavigationDiagnostic
 from .targets import NormalizedTarget, TargetError, normalize_target
 from .traffic import TrafficController
 
@@ -21,6 +21,7 @@ class BrowserDiscoveryOptions:
     allowed_origins: frozenset[str] = frozenset()
     max_pages: int = 20
     max_depth: int = 2
+    redirect_only: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -29,6 +30,9 @@ class BrowserDiscoveryResult:
     operations: tuple[ApiOperation, ...]
     errors: tuple[str, ...]
     requests: int
+    browser_navigation_observed: bool | None = None
+    browser_navigation_diagnostic: BrowserNavigationDiagnostic | None = None
+    browser_navigation_hops: tuple[str, ...] = ()
 
 
 def discover_browser(
@@ -48,6 +52,8 @@ def discover_browser(
             capture_screenshots=False,
             allowed_origins=origins,
             traffic=traffic,
+            redirect_only=options.redirect_only,
+            settle_seconds=5.0 if options.redirect_only else 1.5,
         )
         queue = deque([(target.url, 0)])
         seen: set[str] = set()
@@ -55,6 +61,9 @@ def discover_browser(
         operations: list[ApiOperation] = []
         errors = []
         requests = 0
+        navigation = None
+        diagnostic = None
+        hops: tuple[str, ...] = ()
         deadline = monotonic() + config.target_timeout_seconds
         async with BrowserCapturer(visual, config) as browser:
             while queue:
@@ -74,9 +83,21 @@ def discover_browser(
                     max(0.001, deadline - monotonic()),
                 )
                 requests += capture.request_count
+                if len(seen) == 1:
+                    navigation = capture.browser_navigation_observed
+                    diagnostic = capture.browser_navigation_diagnostic
+                    hops = capture.browser_navigation_hops
+                if options.redirect_only:
+                    if capture.error and not (diagnostic and diagnostic.hostname):
+                        errors.append("Browser redirect observation failed")
+                    break
                 operations.extend(capture.api_operations)
                 if capture.error:
-                    errors.append("Browser discovery page failed")
+                    errors.append(
+                        "Browser discovery stopped at an out-of-scope navigation"
+                        if diagnostic and diagnostic.hostname
+                        else "Browser discovery page failed"
+                    )
                     continue
                 pages.extend(
                     response
@@ -86,7 +107,13 @@ def discover_browser(
                 if depth < options.max_depth:
                     queue.extend((link, depth + 1) for link in capture.discovered_urls)
         return BrowserDiscoveryResult(
-            tuple(pages), tuple(dict.fromkeys(operations)), tuple(dict.fromkeys(errors)), requests
+            tuple(pages),
+            tuple(dict.fromkeys(operations)),
+            tuple(dict.fromkeys(errors)),
+            requests,
+            navigation,
+            diagnostic,
+            hops,
         )
 
     return asyncio.run(run())
