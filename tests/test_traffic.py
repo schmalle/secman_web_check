@@ -149,22 +149,27 @@ def _admit(controller, origin):
         time.sleep(0.02)
 
 
-def test_tls_handshakes_use_their_own_per_origin_pace():
+def test_tls_handshakes_use_their_own_per_origin_pace(monkeypatch):
+    now = [0.0]
+    monkeypatch.setattr("secman_web_check.traffic.monotonic", lambda: now[0])
+    monkeypatch.setattr(
+        "secman_web_check.traffic.sleep", lambda delay: now.__setitem__(0, now[0] + delay)
+    )
     config = ScannerConfig(
         requests_per_second=1, tls_connections_per_second=50, global_requests_per_second=1000
     )
     controller = TrafficController(config)
-    started = time.monotonic()
+    started = now[0]
     for _ in range(5):
         with controller.admit("https://fixture.example:443", "tls"):
             pass
-    assert time.monotonic() - started < 0.5
+    assert now[0] - started < 0.5
     with controller.admit("https://fixture.example:443", "http"):
         pass
-    started = time.monotonic()
+    started = now[0]
     with controller.admit("https://fixture.example:443", "http"):
         pass
-    assert time.monotonic() - started >= 0.9
+    assert now[0] - started >= 0.9
 
 
 def test_default_budgets_fit_a_full_tls_inventory_within_the_target_deadline():
