@@ -1,0 +1,4 @@
+interface:
+  display_name: "Source Security Review"
+  short_description: "Review local source and commit changes for security issues"
+  default_prompt: "Use $source-security-review to review this folder and report findings with confidence."
